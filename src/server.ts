@@ -12,8 +12,7 @@ import dotenv from 'dotenv';
 dotenv.config();
 
 // API 모듈 임포트
-import { fetchMajorIndex, fetchExchangeRate, fetchMarketFunds, fetchDailyCreditBalance, fetchInvestorRanking } from './api/kis-market.js';
-import { fetchKRXMarketSummary } from './api/krx.js';
+import { fetchMajorIndex, fetchExchangeRate, fetchMarketFunds, fetchNewHighCount, fetchInvestorRanking, fetchADRFromInfo } from './api/kis-market.js';
 import { fetchFearGreedIndex, type FearGreedResponse } from './api/feargreed.js';
 import { sendKakaoAlert } from './utils/alert.js';
 
@@ -106,35 +105,22 @@ async function fetchAllMarketData() {
     globalCache.marketOverview = [kospi, kosdaq, kospi200, exchangeRate].filter(Boolean);
     console.log(`[FETCH] 시장 지수: ${globalCache.marketOverview.length}개 수집 완료`);
 
-    // 2. 카나리아 데이터 (자금동향, 신용잔고, ADR)
+    // 2. 카나리아 데이터 (자금동향, 신용잔고, ADR, 신고가)
     console.log("[FETCH] 카나리아 데이터 수집 중...");
-    const [funds, creditHistory, kospiInfo, krxMarket] = await Promise.all([
-      fetchMarketFunds().catch(e => { console.error("자금동향 에러:", e.message); return null; }),
-      fetchDailyCreditBalance(20).catch(e => { console.error("신용잔고 에러:", e.message); return []; }),
-      fetchMajorIndex("0001", "코스피").catch(() => null), // ADR용 재호출 (캐시 활용)
-      fetchKRXMarketSummary('01').catch(e => { console.error("KRX 에러:", e.message); return null; }),
+    const [combinedCanary, newHighCount, adrData] = await Promise.all([
+      fetchMarketFunds().catch(e => { console.error("자금동향/신용잔고 에러:", e.message); return { funds: null, creditHistory: [] }; }),
+      fetchNewHighCount().catch(e => { console.error("신고가 에러:", e.message); return 0; }),
+      fetchADRFromInfo().catch(e => { console.error("ADR 크롤링 에러:", e.message); return { kospi: null, kosdaq: null }; }),
     ]);
 
-    // ADR 계산
-    const adv = krxMarket?.advanceCount || (kospiInfo as any)?.advanceCount || 0;
-    const dec = krxMarket?.declineCount || (kospiInfo as any)?.declineCount || 0;
-    let adr = 0;
-    let adrSignal = "데이터 부족";
-    if (adv && dec) {
-      adr = (adv / dec) * 100;
-      adrSignal = adr >= 120 ? "매도 검토 (과열)" : adr <= 80 ? "바닥권 신호 (과매도)" : "중립";
-    }
-
     globalCache.canaryData = {
-      funds,
-      creditHistory,
-      adr: adr.toFixed(1),
-      adrSignal,
-      advanceCount: adv,
-      declineCount: dec,
-      newHighCount: 0, // TODO: 52주 신고가 스크래퍼 연동
+      funds: combinedCanary.funds,
+      creditHistory: combinedCanary.creditHistory,
+      adrKospi: adrData.kospi,
+      adrKosdaq: adrData.kosdaq,
+      newHighCount: newHighCount || 0,
     };
-    console.log(`[FETCH] 카나리아: ADR=${adr.toFixed(1)}% (${adrSignal})`);
+    console.log(`[FETCH] 카나리아: KOSPI ADR=${adrData.kospi?.adr || 'N/A'}% (${adrData.kospi?.signal || 'N/A'}), KOSDAQ ADR=${adrData.kosdaq?.adr || 'N/A'}% (${adrData.kosdaq?.signal || 'N/A'}), 신고가=${newHighCount}종목`);
 
     // 3. 공포탐욕지수
     console.log("[FETCH] 공포탐욕지수 수집 중...");

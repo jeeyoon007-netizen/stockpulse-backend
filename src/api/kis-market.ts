@@ -4,7 +4,14 @@
  * - 순수 Node.js fetch 기반으로 변환
  */
 import { getAccessToken, KIS_BASE_URL, formatYYYYMMDD } from './kis.js';
-
+import {
+  parseMajorIndex,
+  parseMajorIndexLatest,
+  parseExchangeRate,
+  parseCanaryCombined,
+  parseInvestorRanking,
+  parseStockDetail
+} from './parsers/kis_parser.js';
 // --- 타임아웃 fetch ---
 async function fetchWithTimeout(url: string, options: RequestInit, timeout = 5000): Promise<Response> {
   const controller = new AbortController();
@@ -20,6 +27,17 @@ async function fetchWithTimeout(url: string, options: RequestInit, timeout = 500
 }
 
 // --- Interfaces ---
+
+export interface ADRMarketData {
+  adr: string;
+  time: string;
+  signal: string;
+}
+
+export interface ADRCombinedData {
+  kospi: ADRMarketData | null;
+  kosdaq: ADRMarketData | null;
+}
 
 export interface MarketFundsData {
   date: string;
@@ -93,22 +111,7 @@ async function _fetchMajorIndexInternal(
     const res = await fetchWithTimeout(url, { headers });
     if (!res.ok) return null;
     const data = await res.json();
-    if (data.rt_cd !== "0" || !data.output) return null;
-
-    const out = data.output;
-    const prpr = Number(out.bstp_nmix_prpr || 0);
-    const prdy_vrss = Number(out.bstp_nmix_prdy_vrss || 0);
-    const direction: "up" | "down" | "flat" = prdy_vrss > 0 ? "up" : prdy_vrss < 0 ? "down" : "flat";
-
-    return {
-      label,
-      value: prpr.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 }),
-      change: (prdy_vrss > 0 ? "+" : "") + prdy_vrss.toFixed(2),
-      changePercent: (prdy_vrss > 0 ? "+" : "") + (out.bstp_nmix_prdy_ctrt || "0.00") + "%",
-      direction,
-      advanceCount: Number(out.ascn_issu_cnt || 0),
-      declineCount: Number(out.down_issu_cnt || 0),
-    };
+    return parseMajorIndex(data, label);
   } catch {
     return null;
   }
@@ -133,23 +136,73 @@ async function fetchMajorIndexLatest(code: string, label: string): Promise<Index
     const res = await fetch(url, { headers });
     if (!res.ok) return null;
     const data = await res.json();
-    if (data.rt_cd !== "0" || !data.output1?.[0]) return null;
-
-    const out = data.output1[0];
-    const prpr = Number(out.bstp_nmix_prpr || 0);
-    const prdy_vrss = Number(out.bstp_nmix_prdy_vrss || 0);
-    const direction: "up" | "down" | "flat" = prdy_vrss > 0 ? "up" : prdy_vrss < 0 ? "down" : "flat";
-
-    return {
-      label,
-      value: prpr.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 }),
-      change: (prdy_vrss > 0 ? "+" : "") + prdy_vrss.toFixed(2),
-      changePercent: (prdy_vrss > 0 ? "+" : "") + (out.bstp_nmix_prdy_ctrt || "0.00") + "%",
-      direction,
-    };
+    return parseMajorIndexLatest(data, label);
   } catch {
     return null;
   }
+}
+
+/**
+ * http://www.adrinfo.kr/ 에서 KOSPI/KOSDAQ 실시간 ADR 정보를 크롤링하여 파싱합니다.
+ */
+export async function fetchADRFromInfo(): Promise<ADRCombinedData> {
+  const url = "http://www.adrinfo.kr/";
+  const result: ADRCombinedData = { kospi: null, kosdaq: null };
+  
+  try {
+    const response = await fetch(url, {
+      headers: {
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
+      },
+      signal: AbortSignal.timeout(5000)
+    });
+    
+    if (!response.ok) {
+      throw new Error(`HTTP error! status: ${response.status}`);
+    }
+
+    const html = await response.text();
+    
+    // KOSPI 파싱
+    const kospiBlockIndex = html.indexOf('<header>KOSPI</header>');
+    if (kospiBlockIndex !== -1) {
+      const kospiBlock = html.substring(kospiBlockIndex, kospiBlockIndex + 1000);
+      const timeMatch = kospiBlock.match(/<small>\s*(\d{4}-\d{2}-\d{2}\s*\([^)]+\))\s*<\/small>/);
+      const adrMatch = kospiBlock.match(/<h2 class="card-title">\s*([\d.]+)\s*<small>%<\/small>/);
+      
+      if (adrMatch && timeMatch) {
+        const adrVal = parseFloat(adrMatch[1].trim());
+        const signal = adrVal >= 120 ? "매도 검토 (과열)" : adrVal <= 80 ? "바닥권 신호 (과매도)" : "중립";
+        result.kospi = {
+          adr: adrMatch[1].trim(),
+          time: timeMatch[1].trim(),
+          signal
+        };
+      }
+    }
+    
+    // KOSDAQ 파싱
+    const kosdaqBlockIndex = html.indexOf('<header>KOSDAQ</header>');
+    if (kosdaqBlockIndex !== -1) {
+      const kosdaqBlock = html.substring(kosdaqBlockIndex, kosdaqBlockIndex + 1000);
+      const timeMatch = kosdaqBlock.match(/<small>\s*(\d{4}-\d{2}-\d{2}\s*\([^)]+\))\s*<\/small>/);
+      const adrMatch = kosdaqBlock.match(/<h2 class="card-title">\s*([\d.]+)\s*<small>%<\/small>/);
+      
+      if (adrMatch && timeMatch) {
+        const adrVal = parseFloat(adrMatch[1].trim());
+        const signal = adrVal >= 120 ? "매도 검토 (과열)" : adrVal <= 80 ? "바닥권 신호 (과매도)" : "중립";
+        result.kosdaq = {
+          adr: adrMatch[1].trim(),
+          time: timeMatch[1].trim(),
+          signal
+        };
+      }
+    }
+  } catch (error: any) {
+    console.error("fetchADRFromInfo exception:", error.message);
+  }
+  
+  return result;
 }
 
 /**
@@ -169,24 +222,7 @@ export async function fetchExchangeRate(): Promise<IndexPriceData | null> {
     const res = await fetchWithTimeout(url, {}, 7000);
     if (!res.ok) return null;
     const data = await res.json();
-    if (!data.StatisticSearch?.row || data.StatisticSearch.row.length < 2) return null;
-
-    const rows = data.StatisticSearch.row;
-    const latest = rows[rows.length - 1];
-    const previous = rows[rows.length - 2];
-    const prpr = Number(latest.DATA_VALUE || 0);
-    const prevPrpr = Number(previous.DATA_VALUE || 0);
-    const prdy_vrss = Number((prpr - prevPrpr).toFixed(2));
-    const prdy_ctrt = Number(((prdy_vrss / prevPrpr) * 100).toFixed(2));
-    const direction: "up" | "down" | "flat" = prdy_vrss > 0 ? "up" : prdy_vrss < 0 ? "down" : "flat";
-
-    return {
-      label: "원/달러",
-      value: prpr.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 }),
-      change: (prdy_vrss > 0 ? "+" : "") + prdy_vrss.toFixed(2),
-      changePercent: (prdy_vrss > 0 ? "+" : "") + prdy_ctrt.toFixed(2) + "%",
-      direction,
-    };
+    return parseExchangeRate(data);
   } catch (error) {
     console.error("fetchExchangeRate exception:", error);
     return null;
@@ -194,9 +230,9 @@ export async function fetchExchangeRate(): Promise<IndexPriceData | null> {
 }
 
 /**
- * 국내 증시자금 종합 (고객예탁금 등)
+ * 국내 증시자금 종합 및 신용잔고 내역 (통합)
  */
-export async function fetchMarketFunds(): Promise<MarketFundsData | null> {
+export async function fetchMarketFunds(): Promise<{ funds: MarketFundsData | null, creditHistory: CreditBalanceData[] }> {
   const token = await getAccessToken();
   const appKey = process.env.KIS_APP_KEY!;
   const appSecret = process.env.KIS_APP_SECRET!;
@@ -214,59 +250,69 @@ export async function fetchMarketFunds(): Promise<MarketFundsData | null> {
 
   try {
     const res = await fetchWithTimeout(url, { headers });
-    if (!res.ok) return null;
+    if (!res.ok) return { funds: null, creditHistory: [] };
     const data = await res.json();
-    if (data.rt_cd !== "0" || !data.output) return null;
-
-    const latest = data.output;
-    return {
-      date: latest.stck_bsop_date || "",
-      deposit: Number(latest.cstmr_u_ast_amt || 0) * 100000000,
-      margin_loan: Number(latest.shcl_und_amt || 0) * 100000000,
-      misu: Number(latest.entr_asst_amt || 0) * 100000000,
-    };
+    return parseCanaryCombined(data);
   } catch (error) {
     console.error("fetchMarketFunds exception:", error);
-    return null;
+    return { funds: null, creditHistory: [] };
   }
 }
 
 /**
- * 신용잔고 일별 추이
+ * 52주 신고가 종목 수 (코스피 + 코스닥)
  */
-export async function fetchDailyCreditBalance(days = 20): Promise<CreditBalanceData[]> {
+export async function fetchNewHighCount(): Promise<number> {
   const token = await getAccessToken();
   const appKey = process.env.KIS_APP_KEY!;
   const appSecret = process.env.KIS_APP_SECRET!;
 
-  const startDate = new Date();
-  startDate.setDate(startDate.getDate() - (days + 20));
-  const startStr = formatYYYYMMDD(startDate);
+  const fetchMarketHigh = async (marketCode: string) => {
+    let totalItems: any[] = [];
+    let trCont = "";
+    
+    for (let i = 0; i < 5; i++) {
+        const url = `${KIS_BASE_URL}/uapi/domestic-stock/v1/ranking/near-new-highlow?fid_cond_mrkt_div_code=J&fid_cond_scr_div_code=20187&fid_div_cls_code=0&fid_input_cnt_1=0&fid_input_cnt_2=0&fid_prc_cls_code=0&fid_input_iscd=${marketCode}&fid_trgt_cls_code=0&fid_trgt_exls_cls_code=0&fid_aply_rang_prc_1=0&fid_aply_rang_prc_2=1000000&fid_aply_rang_vol=0`;
 
-  const url = `${KIS_BASE_URL}/uapi/domestic-stock/v1/quotations/daily-credit-balance?FID_COND_MRKT_DIV_CODE=J&FID_COND_SCR_DIV_CODE=20476&FID_INPUT_ISCD=0000&FID_INPUT_DATE_1=${startStr}`;
-  const headers = {
-    "Content-Type": "application/json",
-    authorization: `Bearer ${token}`,
-    appkey: appKey,
-    appsecret: appSecret,
-    tr_id: "FHPST04760000",
-    custtype: "P",
+        const headers: any = {
+            "Content-Type": "application/json",
+            authorization: `Bearer ${token}`,
+            appkey: appKey,
+            appsecret: appSecret,
+            tr_id: "FHPST01870000",
+            custtype: "P",
+        };
+        
+        if (trCont) {
+            headers.tr_cont = trCont;
+        }
+
+        try {
+            const res = await fetchWithTimeout(url, { headers });
+            if (!res.ok) break;
+            
+            trCont = res.headers.get("tr_cont") || "";
+            const data = await res.json();
+            
+            if (data.rt_cd === "0" && Array.isArray(data.output)) {
+                totalItems = [...totalItems, ...data.output];
+            } else {
+                break;
+            }
+            
+            if (trCont !== "M" && trCont !== "F") break;
+        } catch (error) {
+            console.error("fetchNewHighCount exception:", error);
+            break;
+        }
+    }
+    return totalItems.length;
   };
 
-  try {
-    const res = await fetchWithTimeout(url, { headers });
-    if (!res.ok) return [];
-    const data = await res.json();
-    if (data.rt_cd !== "0" || !data.output) return [];
+  const kospiCount = await fetchMarketHigh('0001');
+  const kosdaqCount = await fetchMarketHigh('1001');
 
-    return (data.output as any[]).slice(0, days).map(item => ({
-      date: item.stck_bsop_date,
-      amount: Number(item.shcl_und_amt || 0) * 100000000,
-      ratio: Number(item.shcl_und_amt_icrt || 0),
-    })).reverse();
-  } catch {
-    return [];
-  }
+  return kospiCount + kosdaqCount;
 }
 
 /**
@@ -292,24 +338,7 @@ export async function fetchInvestorRanking(type: '1' | '2', market = '0001'): Pr
   try {
     const res = await fetch(url, { headers });
     const data = await res.json();
-    if (data.rt_cd !== "0" || !data.output) return [];
-
-    return (data.output as any[]).slice(0, 10).map((item, index) => {
-      const foreignAmt = item.frgn_ntby_tr_pbmn || "0";
-      const instAmt = item.orgn_ntby_tr_pbmn || "0";
-      const rawAmount = type === '1' ? foreignAmt : instAmt;
-
-      return {
-        rank: index + 1,
-        code: item.mksc_shrn_iscd || item.hts_shrn_iscd,
-        name: item.hts_kor_isnm,
-        price: Number(item.stck_prpr || 0),
-        change: Number(item.prdy_vrss || 0),
-        changePercent: Number(item.prdy_ctrt || 0),
-        volume: Number(item.acml_vol || 0),
-        amount: Number(rawAmount) * 1000000,
-      };
-    });
+    return parseInvestorRanking(data, type);
   } catch (error) {
     console.error("fetchInvestorRanking exception:", error);
     return [];
@@ -338,14 +367,7 @@ export async function fetchStockDetail(code: string, marketDiv = 'J') {
     const res = await fetch(url, { headers });
     if (!res.ok) return null;
     const data = await res.json();
-    if (data.rt_cd !== "0" || !data.output) return null;
-
-    return {
-      name: data.output.hts_kor_isnm,
-      industry: data.output.bstp_kor_isnm,
-      marketCap: Number(data.output.hts_avls || 0),
-      currentPrice: Number(data.output.stck_prpr || 0),
-    };
+    return parseStockDetail(data);
   } catch {
     return null;
   }
