@@ -3,3 +3,7 @@ dist
 .env
 *.log
 logs/
+src/test_*
+test_index.ts
+test_krx_https.js
+test_harness/
