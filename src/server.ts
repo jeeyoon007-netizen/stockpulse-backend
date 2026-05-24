@@ -12,7 +12,7 @@ import dotenv from 'dotenv';
 dotenv.config();
 
 // API 모듈 임포트
-import { fetchMajorIndex, fetchExchangeRate, fetchMarketFunds, fetchNewHighCount, fetchInvestorRanking, fetchADRFromInfo } from './api/kis-market.js';
+import { fetchMajorIndex, fetchExchangeRate, fetchMarketFunds, fetchNewHighCount, fetchInvestorRanking, fetchADRFromInfo, fetchStockDetail } from './api/kis-market.js';
 import { fetchFearGreedIndex, type FearGreedResponse } from './api/feargreed.js';
 import { sendKakaoAlert } from './utils/alert.js';
 
@@ -73,7 +73,12 @@ app.get('/api/v1/market/fear-greed', (req, res) => {
 });
 
 app.get('/api/v1/market/investor-flow', (req, res) => {
-  res.json(globalCache.investorFlow || {});
+  const market = (req.query.market as string) || '0001';
+  const flow = globalCache.investorFlow;
+  if (!flow) return res.json({ foreignTop10: [], instTop10: [], overlap: [], dominantIndustries: [], highTurnover: [] });
+  // market별 분석 결과 반환
+  const key = market === '1001' ? 'kosdaq' : 'kospi';
+  res.json(flow[key] || { foreignTop10: [], instTop10: [], overlap: [], dominantIndustries: [], highTurnover: [] });
 });
 
 app.get('/api/v1/cache-status', (req, res) => {
@@ -130,14 +135,64 @@ async function fetchAllMarketData() {
     });
     console.log(`[FETCH] 공포탐욕지수: ${globalCache.fearGreed ? '성공' : '실패'}`);
 
-    // 4. 수급 데이터 (외인/기관)
+    // 4. 수급 데이터 (외인/기관) — KOSPI + KOSDAQ 분석 포함
     console.log("[FETCH] 수급 데이터 수집 중...");
-    const [foreignKospi, instKospi] = await Promise.all([
+    const [foreignKospi, instKospi, foreignKosdaq, instKosdaq] = await Promise.all([
       fetchInvestorRanking('1', '0001').catch(() => []),
       fetchInvestorRanking('2', '0001').catch(() => []),
+      fetchInvestorRanking('1', '1001').catch(() => []),
+      fetchInvestorRanking('2', '1001').catch(() => []),
     ]);
-    globalCache.investorFlow = { foreignTop10: foreignKospi, instTop10: instKospi };
-    console.log(`[FETCH] 수급: 외인=${foreignKospi.length}종목, 기관=${instKospi.length}종목`);
+    console.log(`[FETCH] 수급 raw: KOSPI 외인=${foreignKospi.length}, 기관=${instKospi.length} / KOSDAQ 외인=${foreignKosdaq.length}, 기관=${instKosdaq.length}`);
+
+    // 수급 분석 헬퍼 (백엔드에서 처리 → Vercel 타임아웃 방지)
+    const delay = (ms: number) => new Promise(r => setTimeout(r, ms));
+    async function analyzeInvestorFlow(foreign: any[], institutional: any[], market: string) {
+      const foreignTop10 = foreign.slice(0, 10);
+      const instTop10 = institutional.slice(0, 10);
+      const overlap = foreignTop10
+        .filter((f: any) => instTop10.some((i: any) => i.code === f.code))
+        .map((s: any) => ({ name: s.name, code: s.code }));
+
+      const uniqueCodes = Array.from(new Set([...foreignTop10.map((s: any) => s.code), ...instTop10.map((s: any) => s.code)]));
+      const detailMap = new Map();
+      for (const code of uniqueCodes) {
+        const d = await fetchStockDetail(code as string, 'J').catch(() => null);
+        if (d) detailMap.set(code, d);
+        await delay(150);
+      }
+
+      const industryCount: Record<string, number> = {};
+      detailMap.forEach((d: any) => {
+        if (d.industry) industryCount[d.industry] = (industryCount[d.industry] || 0) + 1;
+      });
+      const dominantIndustries = Object.entries(industryCount)
+        .sort((a, b) => b[1] - a[1]).slice(0, 2).map(([name]) => name);
+
+      const threshold = market === '1001' ? 0.5 : 0.15;
+      const highTurnover = Array.from(detailMap.entries())
+        .filter(([code, detail]: [any, any]) => {
+          const stock = [...foreignTop10, ...instTop10].find((s: any) => s.code === code);
+          if (!stock || detail.marketCap === 0) return false;
+          const amountInEok = stock.amount / 100000000;
+          const ratio = (amountInEok / detail.marketCap) * 100;
+          return ratio > threshold;
+        })
+        .map(([code, d]: [any, any]) => {
+          const stock = [...foreignTop10, ...instTop10].find((s: any) => s.code === code);
+          return { name: stock?.name || d.name || '알 수 없음', code };
+        });
+
+      return { foreignTop10, instTop10, overlap, dominantIndustries, highTurnover };
+    }
+
+    const [kospiAnalysis, kosdaqAnalysis] = await Promise.all([
+      analyzeInvestorFlow(foreignKospi, instKospi, '0001').catch(() => ({ foreignTop10: foreignKospi.slice(0,10), instTop10: instKospi.slice(0,10), overlap: [], dominantIndustries: [], highTurnover: [] })),
+      analyzeInvestorFlow(foreignKosdaq, instKosdaq, '1001').catch(() => ({ foreignTop10: foreignKosdaq.slice(0,10), instTop10: instKosdaq.slice(0,10), overlap: [], dominantIndustries: [], highTurnover: [] })),
+    ]);
+
+    globalCache.investorFlow = { kospi: kospiAnalysis, kosdaq: kosdaqAnalysis };
+    console.log(`[FETCH] 수급 분석 완료: KOSPI overlap=${kospiAnalysis.overlap.length}, KOSDAQ overlap=${kosdaqAnalysis.overlap.length}`);
 
     // 캐시 갱신 시점 기록
     globalCache.lastUpdated = Date.now();
