@@ -4,6 +4,44 @@
 
 ---
 
+## 0. ⚠️ AI Git 배포 워크플로우 (필수 준수)
+
+사용자가 "수정사항 깃해줘", "깃 푸시해줘", "배포해줘" 등을 말하면 **반드시 아래 순서를 따른다.**
+
+### 백엔드 푸시 (Render 자동 배포 트리거)
+
+```powershell
+git -C "c:\Users\jeeyo\OneDrive\바탕 화면\study\backend" add -A
+git -C "c:\Users\jeeyo\OneDrive\바탕 화면\study\backend" commit -m "<코밋 메시지>"
+git -C "c:\Users\jeeyo\OneDrive\바탕 화면\study\backend" push origin main
+```
+
+### 프론트엔드 푸시 (Vercel 자동 배포 트리거)
+
+```powershell
+git -C "c:\Users\jeeyo\OneDrive\바탕 화면\study\pwa" add -A
+git -C "c:\Users\jeeyo\OneDrive\바탕 화면\study\pwa" commit -m "<코밋 메시지>"
+git -C "c:\Users\jeeyo\OneDrive\바탕 화면\study\pwa" push origin master
+git -C "c:\Users\jeeyo\OneDrive\바탕 화면\study\pwa" push origin master:main
+```
+
+> **핵심**: 프론트엔드는 로친 브랜치가 `master`이지만 Vercel은 `main`을 추적한다.
+> 반드시 `master:main`까지 푸시해야 Vercel 배포가 트리거된다.
+
+### 프로젝트 배포 구조
+
+| 레포지토리 | 로컈 경로 | 배포 플랫폼 | URL |
+|---|---|---|---|
+| 백엔드 | `study/backend` | **Render** | `https://stock-brv7.onrender.com` |
+| 프론트엔드 | `study/pwa` | **Vercel** | Vercel 자동 도메인 |
+
+### PowerShell 주의사항
+- `&&` 사용 불가 → `;` 또는 별도 커맨드로 실행
+- `push origin master:main` 시 리모트에 이미 다른 내용이 있으면 `--force` 필요
+
+---
+
+
 ## 1. System Architecture & Flow (시스템 아키텍처 및 흐름)
 
 `stockpulse-backend`는 실시간 국내/해외 금융 데이터 및 시장 심리 지표를 백그라운드에서 수집하여 캐싱하고, WebSocket 브로드캐스트와 REST API 폴백을 지원하는 데이터 미들웨어 서버입니다.
