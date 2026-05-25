@@ -120,6 +120,7 @@ graph TD
 │       ├── test_canary.ts      # 신용잔고, 신고가, ADR 등 카나리아 통합 API 검증
 │       ├── test_krx.ts         # KRX 데이터 포털 직접 스크래핑 테스트
 │       ├── test_newhigh_all.ts # 52주 신고가 API 테스트
+│       ├── test_newhigh_by_sector.py # 52주 신고가 종목수 및 업종별 집계 Python 스크립트 (2차 정밀 필터링 적용)
 │       └── test_raw_canary.ts  # 증시자금동향 및 신용잔고 원시 응답 검증
 └── test_harness/
     └── test_krx_parsers.ts     # KIS & ECOS 파서 오프라인 Mock 테스트 하네스
@@ -129,6 +130,11 @@ graph TD
 > **KRX 파서의 감폐(Deprecation) 및 KIS 이관 완료**
 > 과거 직접 웹 크롤링 방식으로 구동되던 `krx_parser.ts` 및 레거시 `test_krx_parsers.ts`는 한국거래소 사이트의 스펙 변화 및 통신 안전성 한계로 인해 **완전히 제거/지원 중단**되었습니다.
 > 현재 모든 시장 연동은 공식 OpenAPI인 **`kis_parser.ts`** 기반으로 이관되었으며, 이에 맞추어 오프라인 테스트 하네스 또한 **`test_harness/test_krx_parsers.ts`**로 새롭게 교체(Integration)되었습니다.
+
+> [!IMPORTANT]
+> **52주 신고가 집계 방식 정밀화 권장 (2차 필터링 도입)**
+> KIS OpenAPI `near_new_highlow` 호출 시, 단순히 응답 배열의 길이(`totalItems.length`)만 집계하는 방식은 KIS API 내부 연산 오차(반올림 및 캐싱)로 인해 신고가 괴리율이 0%를 소폭 초과하는 종목까지 포함될 우려가 있습니다.
+> 향후 스케줄러 수집기 리팩토링 시, 응답 데이터 내 `현재가(stck_prpr) === 52주 최고가(new_hgpr)` 조건 또는 `괴리율(hprc_near_rate) === '0.00'` 검증을 거치는 **2차 정밀 필터링(Defensive Filtering)** 방식을 적극 적용하도록 권장하며, 관련 구현은 [test_newhigh_by_sector.py](file:///c:/Users/jeeyo/OneDrive/바탕 화면/study/backend/src/test_newhigh_by_sector.py)를 참고하십시오.
 
 ---
 
