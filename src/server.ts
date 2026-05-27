@@ -15,6 +15,18 @@ dotenv.config();
 import { fetchMajorIndex, fetchExchangeRate, fetchMarketFunds, fetchNewHighCount, fetchInvestorRanking, fetchADRFromInfo, fetchStockDetail } from './api/kis-market.js';
 import { fetchFearGreedIndex, type FearGreedResponse } from './api/feargreed.js';
 import { sendKakaoAlert } from './utils/alert.js';
+import { fetchAndStoreInvestorFlow } from './api/kis-investor-daily.js';
+import { calcConsecutiveDays, getSupplyBadge } from './api/badge-service.js';
+
+// 날짜 포맷팅 헬퍼 (YYYYMMDD)
+function getTodayDateStr(): string {
+  const now = new Date();
+  const year = now.getFullYear();
+  const month = String(now.getMonth() + 1).padStart(2, '0');
+  const date = String(now.getDate()).padStart(2, '0');
+  return `${year}${month}${date}`;
+}
+
 
 const app = express();
 const server = createServer(app);
@@ -93,6 +105,53 @@ app.get('/api/v1/cache-status', (req, res) => {
   });
 });
 
+// ===== 수급 수집 크론 및 뱃지 수동 수집 트리거 =====
+app.post('/api/v1/market/collect-flow', async (req, res) => {
+  const { date } = req.body;
+  const todayStr = date || getTodayDateStr();
+
+  try {
+    console.log(`[ROUTE] Triggered investor flow collection for date: ${todayStr}`);
+
+    const [foreignKospi, instKospi, foreignKosdaq, instKosdaq] = await Promise.all([
+      fetchInvestorRanking('1', '0001').catch(() => []),
+      fetchInvestorRanking('2', '0001').catch(() => []),
+      fetchInvestorRanking('1', '1001').catch(() => []),
+      fetchInvestorRanking('2', '1001').catch(() => []),
+    ]);
+
+    const allStocks = [
+      ...foreignKospi.slice(0, 10).map((s: any) => s.code),
+      ...instKospi.slice(0, 10).map((s: any) => s.code),
+      ...foreignKosdaq.slice(0, 10).map((s: any) => s.code),
+      ...instKosdaq.slice(0, 10).map((s: any) => s.code)
+    ];
+
+    const uniqueCodes = Array.from(new Set(allStocks));
+
+    if (uniqueCodes.length === 0) {
+      return res.status(400).json({ error: "No active stock codes returned from KIS rankings." });
+    }
+
+    // 백그라운드 수집 실행 (비동기로 응답 후 대기)
+    fetchAndStoreInvestorFlow(uniqueCodes, todayStr)
+      .then(() => {
+        console.log("[ROUTE] Background investor flow collection complete.");
+        // 캐시 데이터 새로고침 트리거
+        fetchAllMarketData().catch(e => console.error("Error refreshing cache:", e));
+      })
+      .catch(err => console.error("[ROUTE] Background investor flow collection error:", err));
+
+    res.status(202).json({
+      status: "processing",
+      message: `Triggered collection for ${uniqueCodes.length} unique stocks.`,
+      stocks: uniqueCodes
+    });
+  } catch (error: any) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
 // ===== 70초 주기 백그라운드 데이터 수집 =====
 async function fetchAllMarketData() {
   const startTime = Date.now();
@@ -112,9 +171,9 @@ async function fetchAllMarketData() {
 
     // 2. 카나리아 데이터 (자금동향, 신용잔고, ADR, 신고가)
     console.log("[FETCH] 카나리아 데이터 수집 중...");
-    const [combinedCanary, newHighCount, adrData] = await Promise.all([
+    const [combinedCanary, newHighResult, adrData] = await Promise.all([
       fetchMarketFunds().catch(e => { console.error("자금동향/신용잔고 에러:", e.message); return { funds: null, creditHistory: [] }; }),
-      fetchNewHighCount().catch(e => { console.error("신고가 에러:", e.message); return 0; }),
+      fetchNewHighCount().catch(e => { console.error("신고가 에러:", e.message); return { count: 0, sectors: [] }; }),
       fetchADRFromInfo().catch(e => { console.error("ADR 크롤링 에러:", e.message); return { kospi: null, kosdaq: null }; }),
     ]);
 
@@ -123,9 +182,10 @@ async function fetchAllMarketData() {
       creditHistory: combinedCanary.creditHistory,
       adrKospi: adrData.kospi,
       adrKosdaq: adrData.kosdaq,
-      newHighCount: newHighCount || 0,
+      newHighCount: newHighResult?.count || 0,
+      newHighSectors: newHighResult?.sectors || [],
     };
-    console.log(`[FETCH] 카나리아: KOSPI ADR=${adrData.kospi?.adr || 'N/A'}% (${adrData.kospi?.signal || 'N/A'}), KOSDAQ ADR=${adrData.kosdaq?.adr || 'N/A'}% (${adrData.kosdaq?.signal || 'N/A'}), 신고가=${newHighCount}종목`);
+    console.log(`[FETCH] 카나리아: KOSPI ADR=${adrData.kospi?.adr || 'N/A'}% (${adrData.kospi?.signal || 'N/A'}), KOSDAQ ADR=${adrData.kosdaq?.adr || 'N/A'}% (${adrData.kosdaq?.signal || 'N/A'}), 신고가=${newHighResult?.count}종목, 업종수=${newHighResult?.sectors?.length || 0}`);
 
     // 3. 공포탐욕지수
     console.log("[FETCH] 공포탐욕지수 수집 중...");
@@ -148,13 +208,40 @@ async function fetchAllMarketData() {
     // 수급 분석 헬퍼 (백엔드에서 처리 → Vercel 타임아웃 방지)
     const delay = (ms: number) => new Promise(r => setTimeout(r, ms));
     async function analyzeInvestorFlow(foreign: any[], institutional: any[], market: string) {
-      const foreignTop10 = foreign.slice(0, 10);
-      const instTop10 = institutional.slice(0, 10);
+      const foreignTop10Raw = foreign.slice(0, 10);
+      const instTop10Raw = institutional.slice(0, 10);
+      
+      const uniqueCodes = Array.from(new Set([...foreignTop10Raw.map((s: any) => s.code), ...instTop10Raw.map((s: any) => s.code)]));
+      
+      // 1. Supabase 기반 연속 순매수 일수 계산 및 뱃지 생성
+      const todayStr = getTodayDateStr();
+      const badgeMap = new Map<string, string>();
+      for (const code of uniqueCodes) {
+        try {
+          const frgnDays = await calcConsecutiveDays(code as string, 'frgn', todayStr);
+          const orgnDays = await calcConsecutiveDays(code as string, 'orgn', todayStr);
+          const badge = getSupplyBadge(frgnDays, orgnDays);
+          badgeMap.set(code as string, badge);
+        } catch (err: any) {
+          console.error(`[BADGE CALCULATOR] Error for ${code}:`, err.message);
+          badgeMap.set(code as string, "");
+        }
+      }
+
+      const foreignTop10 = foreignTop10Raw.map((s: any) => ({
+        ...s,
+        badge: badgeMap.get(s.code) || ""
+      }));
+
+      const instTop10 = instTop10Raw.map((s: any) => ({
+        ...s,
+        badge: badgeMap.get(s.code) || ""
+      }));
+
       const overlap = foreignTop10
         .filter((f: any) => instTop10.some((i: any) => i.code === f.code))
-        .map((s: any) => ({ name: s.name, code: s.code }));
+        .map((s: any) => ({ name: s.name, code: s.code, badge: badgeMap.get(s.code) || "" }));
 
-      const uniqueCodes = Array.from(new Set([...foreignTop10.map((s: any) => s.code), ...instTop10.map((s: any) => s.code)]));
       const detailMap = new Map();
       for (const code of uniqueCodes) {
         const d = await fetchStockDetail(code as string, 'J').catch(() => null);
@@ -180,7 +267,7 @@ async function fetchAllMarketData() {
         })
         .map(([code, d]: [any, any]) => {
           const stock = [...foreignTop10, ...instTop10].find((s: any) => s.code === code);
-          return { name: stock?.name || d.name || '알 수 없음', code };
+          return { name: stock?.name || d.name || '알 수 없음', code, badge: badgeMap.get(code) || "" };
         });
 
       return { foreignTop10, instTop10, overlap, dominantIndustries, highTurnover };

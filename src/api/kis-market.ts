@@ -259,13 +259,18 @@ export async function fetchMarketFunds(): Promise<{ funds: MarketFundsData | nul
   }
 }
 
+// 인메모리 업종 캐시 선언
+const sectorCache = new Map<string, string>();
+
 /**
- * 52주 신고가 종목 수 (코스피 + 코스닥)
+ * 52주 신고가 종목 수 및 업종별 집계 (코스피 + 코스닥)
+ * 2차 정밀 필터링(Defensive Filtering) 적용
  */
-export async function fetchNewHighCount(): Promise<number> {
+export async function fetchNewHighCount(): Promise<{ count: number; sectors: { sector: string; count: number }[] }> {
   const token = await getAccessToken();
   const appKey = process.env.KIS_APP_KEY!;
   const appSecret = process.env.KIS_APP_SECRET!;
+  const delay = (ms: number) => new Promise(resolve => setTimeout(resolve, ms));
 
   const fetchMarketHigh = async (marketCode: string) => {
     let totalItems: any[] = [];
@@ -306,13 +311,65 @@ export async function fetchNewHighCount(): Promise<number> {
             break;
         }
     }
-    return totalItems.length;
+
+    // 2차 정밀 필터링 (Defensive Filtering)
+    // 괴리율(hprc_near_rate)이 '0.00'이거나 현재가(stck_prpr)가 52주 최고가(new_hgpr)와 완전히 일치하는 종목
+    const filtered = totalItems.filter(item => {
+      const hprcNearRate = parseFloat(item.hprc_near_rate || "");
+      const stckPrpr = parseFloat(item.stck_prpr || "");
+      const newHgpr = parseFloat(item.new_hgpr || "");
+      
+      const isNearZero = hprcNearRate === 0.0;
+      const isPriceEqual = stckPrpr > 0 && stckPrpr === newHgpr;
+      
+      return isNearZero || isPriceEqual;
+    });
+
+    return filtered;
   };
 
-  const kospiCount = await fetchMarketHigh('0001');
-  const kosdaqCount = await fetchMarketHigh('1001');
+  try {
+    const kospiItems = await fetchMarketHigh('0001');
+    const kosdaqItems = await fetchMarketHigh('1001');
+    const allFilteredItems = [...kospiItems, ...kosdaqItems];
 
-  return kospiCount + kosdaqCount;
+    const sectorsMap: Record<string, number> = {};
+
+    for (const item of allFilteredItems) {
+      const code = item.mksc_shrn_iscd || item.stck_shrn_iscd || item.hts_shrn_iscd || item.shrn_iscd;
+      if (!code) continue;
+
+      let sector: string | undefined = sectorCache.get(code);
+      if (sector === undefined) {
+        try {
+          const detail = await fetchStockDetail(code, 'J');
+          const industryName = detail?.industry || "미분류";
+          sectorCache.set(code, industryName);
+          sector = industryName;
+          // KIS API 호출율 제한(Rate Limit) 방지를 위해 100ms 대기
+          await delay(100);
+        } catch (err) {
+          console.error(`Failed to fetch sector for code ${code}:`, err);
+          sector = "미분류";
+        }
+      }
+      
+      const sectorKey = sector || "미분류";
+      sectorsMap[sectorKey] = (sectorsMap[sectorKey] || 0) + 1;
+    }
+
+    const sectorsList = Object.entries(sectorsMap)
+      .map(([sector, count]) => ({ sector, count }))
+      .sort((a, b) => b.count - a.count);
+
+    return {
+      count: allFilteredItems.length,
+      sectors: sectorsList
+    };
+  } catch (error) {
+    console.error("fetchNewHighCount main loop error:", error);
+    return { count: 0, sectors: [] };
+  }
 }
 
 /**
