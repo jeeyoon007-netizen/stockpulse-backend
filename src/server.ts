@@ -17,6 +17,7 @@ import { fetchFearGreedIndex, type FearGreedResponse } from './api/feargreed.js'
 import { sendKakaoAlert } from './utils/alert.js';
 import { fetchAndStoreInvestorFlow } from './api/kis-investor-daily.js';
 import { calcConsecutiveDays, getSupplyBadge } from './api/badge-service.js';
+import { supabase } from './api/supabase.js';
 
 // 날짜 포맷팅 헬퍼 (YYYYMMDD)
 function getTodayDateStr(): string {
@@ -185,6 +186,33 @@ async function fetchAllMarketData() {
       newHighCount: newHighResult?.count || 0,
       newHighSectors: newHighResult?.sectors || [],
     };
+
+    // Supabase에 신고가 데이터 누적 저장 (실시간 T+0 영업일 기준)
+    try {
+      if (supabase && newHighResult && newHighResult.count > 0) {
+        const kstDate = new Date(Date.now() + 9 * 60 * 60 * 1000);
+        const yyyy = kstDate.getUTCFullYear();
+        const mm = String(kstDate.getUTCMonth() + 1).padStart(2, '0');
+        const dd = String(kstDate.getUTCDate()).padStart(2, '0');
+        const todayStr = `${yyyy}-${mm}-${dd}`;
+
+        const { error: upsertError } = await supabase
+          .from('market_new_highs_history')
+          .upsert({
+            trade_date: todayStr,
+            new_high_count: newHighResult.count,
+            new_high_sectors: newHighResult.sectors,
+          }, { onConflict: 'trade_date' });
+
+        if (upsertError) {
+          console.error("[SUPABASE] market_new_highs_history upsert error:", upsertError.message);
+        } else {
+          console.log(`[SUPABASE] Successfully upserted new highs for ${todayStr}: count=${newHighResult.count}`);
+        }
+      }
+    } catch (dbErr: any) {
+      console.error("[SUPABASE] DB exception:", dbErr.message);
+    }
     console.log(`[FETCH] 카나리아: KOSPI ADR=${adrData.kospi?.adr || 'N/A'}% (${adrData.kospi?.signal || 'N/A'}), KOSDAQ ADR=${adrData.kosdaq?.adr || 'N/A'}% (${adrData.kosdaq?.signal || 'N/A'}), 신고가=${newHighResult?.count}종목, 업종수=${newHighResult?.sectors?.length || 0}`);
 
     // 3. 공포탐욕지수
@@ -364,3 +392,17 @@ server.listen(PORT, () => {
   // 70초 주기 반복
   setInterval(fetchAllMarketData, FETCH_INTERVAL);
 });
+
+// YYYY-MM-DD 형식의 오늘 날짜 구하기
+const todayStr = new Date().toISOString().split('T')[0]; 
+
+if (supabase) {
+  // 오늘 날짜 행에 실시간 수치를 덮어씌움 (장중 계속 갱신되다가 장마감 수치로 고정됨)
+  await supabase
+    .from('market_new_highs_history')
+    .upsert({
+      trade_date: todayStr,
+      new_high_count: newHighResult?.count || 0,
+      new_high_sectors: newHighResult?.sectors || [],
+    }, { onConflict: 'trade_date' });
+}
