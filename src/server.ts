@@ -18,6 +18,9 @@ import { sendKakaoAlert } from './utils/alert.js';
 import { fetchAndStoreInvestorFlow } from './api/kis-investor-daily.js';
 import { calcConsecutiveDays, getSupplyBadge } from './api/badge-service.js';
 import { supabase } from './api/supabase.js';
+import cron from 'node-cron';
+import { fetchStockOHLCV } from './api/kis-stock-ohlcv.js';
+import { runAnalysisEngine, type AnalysisMode } from './api/analysis/engine.js';
 
 // 날짜 포맷팅 헬퍼 (YYYYMMDD)
 function getTodayDateStr(): string {
@@ -150,6 +153,84 @@ app.post('/api/v1/market/collect-flow', async (req, res) => {
     });
   } catch (error: any) {
     res.status(500).json({ error: error.message });
+  }
+});
+
+// ===== 주식 분석 엔진 통합 엔드포인트 =====
+app.post('/api/v1/analysis/run', async (req, res) => {
+  const code = (req.query.code as string) || req.body?.code;
+  const mode = (req.query.mode as AnalysisMode) || req.body?.mode || 'scalp';
+  
+  if (!code) {
+    return res.status(400).json({ success: false, error: "종목 코드가 필요합니다." });
+  }
+
+  try {
+    const stockData = await fetchStockOHLCV(code, 240);
+    let prevPersistCycle = 0;
+    
+    if (supabase) {
+      const { data: prev } = await supabase
+        .from('analysis_states')
+        .select('market_state, persist_cycle_remaining, analyzed_at')
+        .eq('stock_code', code)
+        .order('analyzed_at', { ascending: false })
+        .limit(1)
+        .single();
+
+      if (prev?.persist_cycle_remaining && prev.persist_cycle_remaining > 0) {
+        const elapsed = Date.now() - new Date(prev.analyzed_at).getTime();
+        const MIN_COOLDOWN_MS = 5 * 60 * 1000;
+        if (elapsed < MIN_COOLDOWN_MS) {
+          prevPersistCycle = prev.persist_cycle_remaining + 1;
+        } else {
+          prevPersistCycle = prev.persist_cycle_remaining;
+        }
+      }
+    }
+
+    const result = runAnalysisEngine(stockData.ohlcv, mode as AnalysisMode, prevPersistCycle);
+
+    if (supabase) {
+      const { error: dbError } = await supabase.from('analysis_logs').insert({
+        stock_code: code,
+        stock_name: stockData.name,
+        current_price: stockData.currentPrice,
+        audit_logs: result.auditLogs,
+        strategy_scenario: result.strategy,
+        experts_opinion: result.experts
+      });
+
+      const { error: stateError } = await supabase.from('analysis_states').insert({
+        stock_code: code,
+        market_state: result.marketState,
+        mode,
+        weighted_score: result.weightedScore,
+        veto_triggered: result.veto.triggered,
+        veto_source: result.veto.source || null,
+        persist_cycle_remaining: result.persistCycleRemaining,
+      });
+
+      if (dbError || stateError) {
+        console.error("[ANALYSIS DB ERROR] 분석 결과 저장 실패:", (dbError || stateError)?.message);
+      }
+    }
+
+    res.json({
+      success: true,
+      stockData: {
+        code: stockData.code,
+        name: stockData.name,
+        currentPrice: stockData.currentPrice,
+        change: stockData.change,
+        changePercent: stockData.changePercent,
+        ohlcv: stockData.ohlcv
+      },
+      analysis: result
+    });
+  } catch (error: any) {
+    console.error(`[ANALYSIS ERROR] ${code}: ${error.message}`);
+    res.status(500).json({ success: false, error: error.message || "알 수 없는 에러가 발생했습니다." });
   }
 });
 
@@ -394,15 +475,10 @@ server.listen(PORT, () => {
 });
 
 // YYYY-MM-DD 형식의 오늘 날짜 구하기
-const todayStr = new Date().toISOString().split('T')[0]; 
+const todayStr = new Date().toISOString().split('T')[0];
 
-if (supabase) {
-  // 오늘 날짜 행에 실시간 수치를 덮어씌움 (장중 계속 갱신되다가 장마감 수치로 고정됨)
-  await supabase
-    .from('market_new_highs_history')
-    .upsert({
-      trade_date: todayStr,
-      new_high_count: newHighResult?.count || 0,
-      new_high_sectors: newHighResult?.sectors || [],
-    }, { onConflict: 'trade_date' });
-}
+// 스케줄러: 매일 오후 15시 40분에 실행 (월~금)
+cron.schedule('40 15 * * 1-5', async () => {
+  console.log('[CRON] 장마감 자동 분석 스케줄러 실행 (15:40)');
+  // 추후 전 종목 또는 관심 종목 리스트를 불러와서 자동 분석을 돌리는 로직 추가
+});
