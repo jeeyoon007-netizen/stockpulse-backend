@@ -12,7 +12,7 @@ import dotenv from 'dotenv';
 dotenv.config();
 
 // API 모듈 임포트
-import { fetchMajorIndex, fetchExchangeRate, fetchMarketFunds, fetchNewHighCount, fetchInvestorRanking, fetchADRFromInfo, fetchStockDetail } from './api/kis-market.js';
+import { fetchMajorIndex, fetchExchangeRate, fetchMarketFunds, fetchNewHighCount, fetchInvestorRanking, fetchStockDetail } from './api/kis-market.js';
 import { fetchFearGreedIndex, type FearGreedResponse } from './api/feargreed.js';
 import { sendKakaoAlert } from './utils/alert.js';
 import { fetchAndStoreInvestorFlow } from './api/kis-investor-daily.js';
@@ -251,19 +251,19 @@ async function fetchAllMarketData() {
     globalCache.marketOverview = [kospi, kosdaq, kospi200, exchangeRate].filter(Boolean);
     console.log(`[FETCH] 시장 지수: ${globalCache.marketOverview.length}개 수집 완료`);
 
-    // 2. 카나리아 데이터 (자금동향, 신용잔고, ADR, 신고가)
+    // 2. 카나리아 데이터 (자금동향, 신용잔고, 신고가)
+    // ⚠️ ADR은 Render IP 차단(403)으로 크롤링 불가 → 프론트 Vercel에서 직접 수행
     console.log("[FETCH] 카나리아 데이터 수집 중...");
-    const [combinedCanary, newHighResult, adrData] = await Promise.all([
+    const [combinedCanary, newHighResult] = await Promise.all([
       fetchMarketFunds().catch(e => { console.error("자금동향/신용잔고 에러:", e.message); return { funds: null, creditHistory: [] }; }),
       fetchNewHighCount().catch(e => { console.error("신고가 에러:", e.message); return { count: 0, sectors: [] }; }),
-      fetchADRFromInfo().catch(e => { console.error("ADR 크롤링 에러:", e.message); return { kospi: null, kosdaq: null }; }),
     ]);
 
     globalCache.canaryData = {
       funds: combinedCanary.funds,
       creditHistory: combinedCanary.creditHistory,
-      adrKospi: adrData.kospi,
-      adrKosdaq: adrData.kosdaq,
+      adrKospi: null,   // ADR: Vercel 프론트에서 fetchADRFromInfo() 호출
+      adrKosdaq: null,  // ADR: Vercel 프론트에서 fetchADRFromInfo() 호출
       newHighCount: newHighResult?.count || 0,
       newHighSectors: newHighResult?.sectors || [],
     };
@@ -294,7 +294,7 @@ async function fetchAllMarketData() {
     } catch (dbErr: any) {
       console.error("[SUPABASE] DB exception:", dbErr.message);
     }
-    console.log(`[FETCH] 카나리아: KOSPI ADR=${adrData.kospi?.adr || 'N/A'}% (${adrData.kospi?.signal || 'N/A'}), KOSDAQ ADR=${adrData.kosdaq?.adr || 'N/A'}% (${adrData.kosdaq?.signal || 'N/A'}), 신고가=${newHighResult?.count}종목, 업종수=${newHighResult?.sectors?.length || 0}`);
+    console.log(`[FETCH] 카나리아: 신고가=${newHighResult?.count}종목, 업종수=${newHighResult?.sectors?.length || 0} (예탁금·신용잔고 포함, ADR은 프론트에서 크롤링)`);
 
     // 3. 공포탐욕지수
     console.log("[FETCH] 공포탐욕지수 수집 중...");
