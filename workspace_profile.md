@@ -86,11 +86,12 @@ graph TD
     Scheduler -.->|에러 발생 시 Kakao Alert| Alert[Kakao Alert Sender]
 ```
 
-### 핵심 수집 및 캐싱 주기 (70초)
-1. **시장 지수 (Major Indices):** 코스피(`0001`), 코스닥(`1001`), 코스피200(`2001`), 원/달러 환율 (ECOS).
-2. **카나리아 데이터 (Canary Data):** 증시자금 동향 (고객예탁금, 신용융자잔고, 미수금), 코스피 52주 신고가 종목 수, KOSPI/KOSDAQ ADR (외부 `adrinfo.kr` 사이트 크롤링 기준 과열/과매도 판별).
-3. **공포탐욕지수 (Fear & Greed Index):** 국내(KR) 및 미국(US) 시장의 공포 탐욕 지수 수집.
-4. **외인/기관 수급 데이터 (Investor Flow):** 코스피 기준 외국인/기관 순매수 상위 10개 종목 정보.
+### 핵심 수집 및 캐싱 주기
+1. **시장 지수 (Major Indices, 70초 주기):** 코스피(`0001`), 코스닥(`1001`), 코스피200(`2001`), 원/달러 환율 (ECOS).
+2. **카나리아 데이터 (Canary Data, 70초 주기):** 증시자금 동향 (고객예탁금, 신용융자잔고, 미수금), 코스피 52주 신고가 종목 수, KOSPI/KOSDAQ ADR (외부 `adrinfo.kr` 사이트 크롤링 기준 과열/과매도 판별).
+3. **공포탐욕지수 (Fear & Greed Index, 70초 주기):** 국내(KR) 및 미국(US) 시장의 공포 탐욕 지수 수집.
+4. **외인/기관 수급 데이터 (Investor Flow, 70초 주기):** 코스피 기준 외국인/기관 순매수 상위 10개 종목 정보.
+5. **매크로 자금동향 DB 누적 (Daily 16:00 주기):** KIS 증시자금추이를 기반으로 `market_funds_history`, `market_credit_history` Supabase 테이블에 일별 데이터 기록 (Phase 2).
 
 ---
 

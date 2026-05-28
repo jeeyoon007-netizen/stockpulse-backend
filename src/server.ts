@@ -22,6 +22,7 @@ import cron from 'node-cron';
 import { fetchStockOHLCV } from './api/kis-stock-ohlcv.js';
 import { runAnalysisEngine, type AnalysisMode } from './api/analysis/engine.js';
 import { fetchMarketCap } from './api/krx-market-cap.js';
+import { calculateMacroIndicators } from './api/analysis/macro.js';
 
 // 날짜 포맷팅 헬퍼 (YYYYMMDD)
 function getTodayDateStr(): string {
@@ -275,6 +276,8 @@ async function fetchAllMarketData() {
       }
     }
 
+    const macroAnalysis = await calculateMacroIndicators();
+
     globalCache.canaryData = {
       funds: combinedCanary.funds,
       creditHistory: combinedCanary.creditHistory,
@@ -284,7 +287,8 @@ async function fetchAllMarketData() {
       newHighSectors: newHighResult?.sectors || [],
       creditDepositRatio,
       creditMarketCapRatio,
-      marketCaps
+      marketCaps,
+      macroAnalysis
     };
 
     // Supabase에 신고가 데이터 누적 저장 (실시간 T+0 영업일 기준)
@@ -500,4 +504,43 @@ const todayStr = new Date().toISOString().split('T')[0];
 cron.schedule('40 15 * * 1-5', async () => {
   console.log('[CRON] 장마감 자동 분석 스케줄러 실행 (15:40)');
   // 추후 전 종목 또는 관심 종목 리스트를 불러와서 자동 분석을 돌리는 로직 추가
+});
+
+// 스케줄러: 매일 오후 16시 00분에 실행 (월~금) - 매크로 자금동향 데이터 누적
+cron.schedule('0 16 * * 1-5', async () => {
+  console.log('[CRON] 매크로 자금동향 데이터 누적 스케줄러 실행 (16:00)');
+  try {
+    const combinedCanary = await fetchMarketFunds();
+    if (combinedCanary.funds && supabase) {
+      // 1. market_funds_history 누적
+      const fDate = combinedCanary.funds.date;
+      const formattedDate = `${fDate.substring(0, 4)}-${fDate.substring(4, 6)}-${fDate.substring(6, 8)}`;
+      await supabase.from('market_funds_history').upsert({
+        trade_date: formattedDate,
+        deposit: combinedCanary.funds.deposit,
+        margin_loan: combinedCanary.funds.margin_loan,
+        misu: combinedCanary.funds.misu
+      }, { onConflict: 'trade_date' });
+
+      console.log(`[CRON] market_funds_history 저장 완료: ${formattedDate}`);
+    }
+
+    if (combinedCanary.creditHistory.length > 0 && supabase) {
+      // 2. market_credit_history 누적 (가장 최근 1건)
+      const latestCredit = combinedCanary.creditHistory[combinedCanary.creditHistory.length - 1];
+      if (latestCredit && latestCredit.date) {
+        const cDate = latestCredit.date;
+        const formattedDate = `${cDate.substring(0, 4)}-${cDate.substring(4, 6)}-${cDate.substring(6, 8)}`;
+        await supabase.from('market_credit_history').upsert({
+          trade_date: formattedDate,
+          amount: latestCredit.amount,
+          ratio: latestCredit.ratio
+        }, { onConflict: 'trade_date' });
+
+        console.log(`[CRON] market_credit_history 저장 완료: ${formattedDate}`);
+      }
+    }
+  } catch (error: any) {
+    console.error('[CRON] 매크로 자금동향 데이터 누적 실패:', error.message);
+  }
 });
