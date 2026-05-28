@@ -21,6 +21,7 @@ import { supabase } from './api/supabase.js';
 import cron from 'node-cron';
 import { fetchStockOHLCV } from './api/kis-stock-ohlcv.js';
 import { runAnalysisEngine, type AnalysisMode } from './api/analysis/engine.js';
+import { fetchMarketCap } from './api/krx-market-cap.js';
 
 // 날짜 포맷팅 헬퍼 (YYYYMMDD)
 function getTodayDateStr(): string {
@@ -254,10 +255,25 @@ async function fetchAllMarketData() {
     // 2. 카나리아 데이터 (자금동향, 신용잔고, 신고가)
     // ⚠️ ADR은 Render IP 차단(403)으로 크롤링 불가 → 프론트 Vercel에서 직접 수행
     console.log("[FETCH] 카나리아 데이터 수집 중...");
-    const [combinedCanary, newHighResult] = await Promise.all([
+    const [combinedCanary, newHighResult, marketCaps] = await Promise.all([
       fetchMarketFunds().catch(e => { console.error("자금동향/신용잔고 에러:", e.message); return { funds: null, creditHistory: [] }; }),
       fetchNewHighCount().catch(e => { console.error("신고가 에러:", e.message); return { count: 0, sectors: [] }; }),
+      fetchMarketCap().catch(e => { console.error("시가총액 에러:", e.message); return null; })
     ]);
+
+    let creditDepositRatio = null;
+    let creditMarketCapRatio = null;
+
+    if (combinedCanary.funds && combinedCanary.funds.deposit > 0) {
+      creditDepositRatio = (combinedCanary.funds.margin_loan / combinedCanary.funds.deposit) * 100;
+    }
+    
+    if (combinedCanary.funds && marketCaps) {
+      const totalCap = marketCaps.kospi + marketCaps.kosdaq;
+      if (totalCap > 0) {
+        creditMarketCapRatio = (combinedCanary.funds.margin_loan / totalCap) * 100;
+      }
+    }
 
     globalCache.canaryData = {
       funds: combinedCanary.funds,
@@ -266,6 +282,9 @@ async function fetchAllMarketData() {
       adrKosdaq: null,  // ADR: Vercel 프론트에서 fetchADRFromInfo() 호출
       newHighCount: newHighResult?.count || 0,
       newHighSectors: newHighResult?.sectors || [],
+      creditDepositRatio,
+      creditMarketCapRatio,
+      marketCaps
     };
 
     // Supabase에 신고가 데이터 누적 저장 (실시간 T+0 영업일 기준)
