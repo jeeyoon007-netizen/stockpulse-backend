@@ -259,8 +259,24 @@ export async function fetchMarketFunds(): Promise<{ funds: MarketFundsData | nul
   }
 }
 
-// 인메모리 업종 캐시 선언
+// 인메모리 업종 캐시 (날짜별 초기화 지원)
 const sectorCache = new Map<string, string>();
+let sectorCacheDate: string = ""; // YYYYMMDD
+
+function getSectorCache(code: string): string | undefined {
+  const today = formatYYYYMMDD(new Date());
+  if (sectorCacheDate !== today) {
+    // 날짜가 바뀌면 캐시 초기화
+    sectorCache.clear();
+    sectorCacheDate = today;
+    console.log(`[sectorCache] 날짜 변경으로 캐시 초기화: ${today}`);
+  }
+  return sectorCache.get(code);
+}
+
+function setSectorCache(code: string, sector: string) {
+  sectorCache.set(code, sector);
+}
 
 /**
  * 52주 신고가 종목 수 및 업종별 집계 (코스피 + 코스닥)
@@ -339,18 +355,19 @@ export async function fetchNewHighCount(): Promise<{ count: number; sectors: { s
       const code = item.mksc_shrn_iscd || item.stck_shrn_iscd || item.hts_shrn_iscd || item.shrn_iscd;
       if (!code) continue;
 
-      let sector: string | undefined = sectorCache.get(code);
+      let sector: string | undefined = getSectorCache(code);
       if (sector === undefined) {
         try {
           const detail = await fetchStockDetail(code, 'J');
           const industryName = detail?.industry || "미분류";
-          sectorCache.set(code, industryName);
+          setSectorCache(code, industryName);
           sector = industryName;
           // KIS API 호출율 제한(Rate Limit) 방지를 위해 100ms 대기
           await delay(100);
         } catch (err) {
           console.error(`Failed to fetch sector for code ${code}:`, err);
           sector = "미분류";
+          setSectorCache(code, sector);
         }
       }
       

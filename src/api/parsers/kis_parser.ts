@@ -58,19 +58,48 @@ export function parseExchangeRate(data: any): IndexPriceData | null {
 }
 
 export function parseCanaryCombined(data: any, days = 20): { funds: MarketFundsData | null, creditHistory: CreditBalanceData[] } {
-  if (!data || data.rt_cd !== "0" || !Array.isArray(data.output) || data.output.length === 0) {
+  // KIS mktfunds API(FHKST649100C0)는 output이 배열 형태로 반환됨
+  // 배열 또는 단일 객체 모두 처리
+  if (!data || data.rt_cd !== "0") {
+    console.error(`[parseCanaryCombined] API 오류: rt_cd=${data?.rt_cd}, msg=${data?.msg1}`);
     return { funds: null, creditHistory: [] };
   }
 
-  const latest = data.output[0];
+  // output을 배열로 정규화
+  let outputArr: any[];
+  if (Array.isArray(data.output)) {
+    outputArr = data.output;
+  } else if (data.output && typeof data.output === 'object') {
+    // 단일 객체인 경우 배열로 감싸기
+    outputArr = [data.output];
+  } else {
+    console.error(`[parseCanaryCombined] output 형태 불명: ${typeof data.output}`);
+    return { funds: null, creditHistory: [] };
+  }
+
+  if (outputArr.length === 0) {
+    console.error('[parseCanaryCombined] output 배열이 비어있음');
+    return { funds: null, creditHistory: [] };
+  }
+
+  const latest = outputArr[0];
+
+  // 고객예탁금 필드 디버그 로그 (처음 파싱 시 필드명 확인)
+  console.log('[parseCanaryCombined] latest 필드 샘플:', JSON.stringify(latest).slice(0, 300));
+
   const funds: MarketFundsData = {
-    date: latest.bsop_date || "",
-    deposit: Number(latest.cust_dpmn_amt || 0) * 100000000,
-    margin_loan: Number(latest.crdt_loan_rmnd || 0) * 100000000,
-    misu: Number(latest.uncl_amt || 0) * 100000000,
+    // KIS FHKST649100C0 실제 필드명 (API 문서 기반)
+    // cust_dpmn_amt (고객예탁금), crdt_loan_rmnd (신용융자잔고), uncl_amt (위탁매매미수금)
+    // 단일 객체일 때: cstmr_u_ast_amt, shcl_und_amt 등으로 올 수도 있으므로 OR 처리
+    date: latest.bsop_date || latest.stck_bsop_date || "",
+    deposit: Number(latest.cust_dpmn_amt || latest.cstmr_u_ast_amt || 0) * 100000000,
+    margin_loan: Number(latest.crdt_loan_rmnd || latest.shcl_und_amt || 0) * 100000000,
+    misu: Number(latest.uncl_amt || latest.entr_asst_amt || 0) * 100000000,
   };
 
-  const history = data.output.slice(0, days + 1);
+  console.log(`[parseCanaryCombined] 파싱 결과: date=${funds.date}, deposit=${funds.deposit}, margin_loan=${funds.margin_loan}`);
+
+  const history = outputArr.slice(0, days + 1);
   const creditHistory: CreditBalanceData[] = [];
   
   const processCount = Math.min(days, history.length > 0 ? history.length - 1 : 0);
@@ -78,17 +107,17 @@ export function parseCanaryCombined(data: any, days = 20): { funds: MarketFundsD
     const current = history[i];
     const previous = history[i + 1];
     
-    const currentAmt = Number(current.crdt_loan_rmnd || 0) * 100000000;
+    const currentAmt = Number(current.crdt_loan_rmnd || current.shcl_und_amt || 0) * 100000000;
     let ratio = 0;
-    if (previous && previous.crdt_loan_rmnd) {
-      const prevAmt = Number(previous.crdt_loan_rmnd || 0) * 100000000;
+    if (previous) {
+      const prevAmt = Number(previous.crdt_loan_rmnd || previous.shcl_und_amt || 0) * 100000000;
       if (prevAmt > 0) {
         ratio = ((currentAmt - prevAmt) / prevAmt) * 100;
       }
     }
     
     creditHistory.push({
-      date: current.bsop_date,
+      date: current.bsop_date || current.stck_bsop_date || "",
       amount: currentAmt,
       ratio: Number(ratio.toFixed(2)),
     });
