@@ -259,11 +259,16 @@ export async function fetchMarketFunds(): Promise<{ funds: MarketFundsData | nul
   }
 }
 
+interface SectorCacheEntry {
+  sector: string;
+  name: string;
+}
+
 // 인메모리 업종 캐시 (날짜별 초기화 지원)
-const sectorCache = new Map<string, string>();
+const sectorCache = new Map<string, SectorCacheEntry>();
 let sectorCacheDate: string = ""; // YYYYMMDD
 
-function getSectorCache(code: string): string | undefined {
+function getSectorCache(code: string): SectorCacheEntry | undefined {
   const today = formatYYYYMMDD(new Date());
   if (sectorCacheDate !== today) {
     // 날짜가 바뀌면 캐시 초기화
@@ -274,8 +279,8 @@ function getSectorCache(code: string): string | undefined {
   return sectorCache.get(code);
 }
 
-function setSectorCache(code: string, sector: string) {
-  sectorCache.set(code, sector);
+function setSectorCache(code: string, sector: string, name: string) {
+  sectorCache.set(code, { sector, name });
 }
 
 /**
@@ -349,34 +354,51 @@ export async function fetchNewHighCount(): Promise<{ count: number; sectors: { s
     const kosdaqItems = await fetchMarketHigh('1001');
     const allFilteredItems = [...kospiItems, ...kosdaqItems];
 
-    const sectorsMap: Record<string, number> = {};
+    const sectorsMap: Record<string, { count: number; stocks: { name: string; code: string }[] }> = {};
 
     for (const item of allFilteredItems) {
       const code = item.mksc_shrn_iscd || item.stck_shrn_iscd || item.hts_shrn_iscd || item.shrn_iscd;
       if (!code) continue;
 
-      let sector: string | undefined = getSectorCache(code);
-      if (sector === undefined) {
+      let cached = getSectorCache(code);
+      let sector: string = cached?.sector || "미분류";
+      let stockName: string = cached?.name || item.hts_kor_isnm || code;
+
+      if (cached === undefined) {
         try {
           const detail = await fetchStockDetail(code, 'J');
           const industryName = detail?.industry || "미분류";
-          setSectorCache(code, industryName);
+          const resolvedName = item.hts_kor_isnm || detail?.name || code;
+          setSectorCache(code, industryName, resolvedName);
           sector = industryName;
+          stockName = resolvedName;
           // KIS API 호출율 제한(Rate Limit) 방지를 위해 100ms 대기
           await delay(100);
         } catch (err) {
           console.error(`Failed to fetch sector for code ${code}:`, err);
+          const resolvedName = item.hts_kor_isnm || code;
           sector = "미분류";
-          setSectorCache(code, sector);
+          stockName = resolvedName;
+          setSectorCache(code, sector, stockName);
         }
       }
       
       const sectorKey = sector || "미분류";
-      sectorsMap[sectorKey] = (sectorsMap[sectorKey] || 0) + 1;
+      const finalName = stockName || item.hts_kor_isnm || code;
+
+      if (!sectorsMap[sectorKey]) {
+        sectorsMap[sectorKey] = { count: 0, stocks: [] };
+      }
+      
+      // 중복 삽입 방지
+      if (!sectorsMap[sectorKey].stocks.some(s => s.code === code)) {
+        sectorsMap[sectorKey].stocks.push({ name: finalName, code });
+        sectorsMap[sectorKey].count += 1;
+      }
     }
 
     const sectorsList = Object.entries(sectorsMap)
-      .map(([sector, count]) => ({ sector, count }))
+      .map(([sector, data]) => ({ sector, count: data.count, stocks: data.stocks }))
       .sort((a, b) => b.count - a.count);
 
     return {

@@ -12,7 +12,19 @@ export function getStockName(code: string): string {
   if (!stockNameMap) {
     stockNameMap = new Map();
     try {
-      const filePath = path.join(__dirname, 'stocks.json');
+      // 1. __dirname/stocks.json (로컬 dev tsx 환경)
+      let filePath = path.join(__dirname, 'stocks.json');
+      
+      // 2. process.cwd()/src/api/stocks.json (Render 배포 또는 로컬 tsc 실행 환경)
+      if (!fs.existsSync(filePath)) {
+        filePath = path.join(process.cwd(), 'src', 'api', 'stocks.json');
+      }
+
+      // 3. process.cwd()/dist/api/stocks.json
+      if (!fs.existsSync(filePath)) {
+        filePath = path.join(process.cwd(), 'dist', 'api', 'stocks.json');
+      }
+
       if (fs.existsSync(filePath)) {
         const fileContent = fs.readFileSync(filePath, 'utf-8');
         const stocks = JSON.parse(fileContent);
