@@ -163,6 +163,7 @@ app.post('/api/v1/market/collect-flow', async (req, res) => {
 app.post('/api/v1/analysis/run', async (req, res) => {
   const code = (req.query.code as string) || req.body?.code;
   const mode = (req.query.mode as AnalysisMode) || req.body?.mode || 'scalp';
+  const clientStockName = req.body?.stock_name || (req.query.stock_name as string);
   
   if (!code) {
     return res.status(400).json({ success: false, error: "종목 코드가 필요합니다." });
@@ -170,6 +171,11 @@ app.post('/api/v1/analysis/run', async (req, res) => {
 
   try {
     const stockData = await fetchStockOHLCV(code, 240);
+    
+    // 프론트엔드에서 전달받은 종목명이 있으면 우선 사용 (백엔드 stocks.json 누락 방어)
+    if (clientStockName && clientStockName !== "검색된 종목") {
+      stockData.name = clientStockName;
+    }
     let prevPersistCycle = 0;
     
     if (supabase) {
