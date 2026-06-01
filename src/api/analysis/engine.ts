@@ -18,13 +18,17 @@ export type AnalysisMode = keyof typeof WEIGHT_PROFILES;
 export type MarketState =
   | "AGGRESSIVE_LONG"
   | "CAUTIOUS_LONG"
+  | "MODERATE_LONG"
   | "HOLD"
+  | "BEARISH_CAUTION"
   | "EXIT_PRIORITY";
 
 export const MARKET_STATE_LABELS: Record<MarketState, string> = {
   AGGRESSIVE_LONG: "🚀 강세 추세 진행 중",
   CAUTIOUS_LONG:   "⚡ 상승 과열 주의",
+  MODERATE_LONG:   "📈 완만한 상승 우위",
   HOLD:            "🔍 방향 탐색 중",
+  BEARISH_CAUTION: "⚠️ 하락 주의",
   EXIT_PRIORITY:   "🚨 탈출 우선 경보",
 };
 
@@ -223,16 +227,40 @@ export function classifyMarketState(
   // 히스테리시스: 최근 5개 RSI 모두 임계값 초과해야 과열 인정
   const rsiConsistentlyHigh = data.rsiHistory.every(r => r > 65);
 
-  if (weightedScore > 0.4 && data.rsi >= 50 && data.rsi <= 65 && data.adx >= 25) {
-    return { state: "AGGRESSIVE_LONG", persistCycleRemaining: 0 };
-  }
-  if (weightedScore > 0.2 && (rsiConsistentlyHigh || data.mfi > 70)) {
-    return { state: "CAUTIOUS_LONG", persistCycleRemaining: 0 };
-  }
-  if (Math.abs(weightedScore) <= 0.2 || data.adx < 20) {
+  // ── 상승 영역 (weightedScore > 0.2) ──
+  if (weightedScore > 0.2) {
+    // 강세: 정상 RSI 구간 + 강한 추세강도
+    if (weightedScore > 0.4 && data.rsi >= 50 && data.rsi <= 65 && data.adx >= 25) {
+      return { state: "AGGRESSIVE_LONG", persistCycleRemaining: 0 };
+    }
+    // 과열 상승: RSI 지속 과열 또는 자금흐름 과매수
+    if (rsiConsistentlyHigh || data.mfi > 70) {
+      return { state: "CAUTIOUS_LONG", persistCycleRemaining: 0 };
+    }
+    // 완만한 상승: 추세는 형성됐지만 강세 게이트 미달
+    if (data.adx >= 20) {
+      return { state: "MODERATE_LONG", persistCycleRemaining: 0 };
+    }
+    // 추세 미형성 → 진입 보류
     return { state: "HOLD", persistCycleRemaining: 0 };
   }
-  return { state: "EXIT_PRIORITY", persistCycleRemaining: 2 };
+
+  // ── 하락 영역 (weightedScore < -0.2) ──
+  if (weightedScore < -0.2) {
+    // 추세가 살아있는 하락 → 탈출 우선 (소프트: persistCycle=0, 회복 즉시 재분류)
+    if (data.adx >= 20) {
+      return { state: "EXIT_PRIORITY",   persistCycleRemaining: 0 };
+    }
+    // 추세 형성 중인 하락 → 하락 주의
+    if (data.adx >= 15) {
+      return { state: "BEARISH_CAUTION", persistCycleRemaining: 0 };
+    }
+    // 추세 미형성 하락 → 관망
+    return { state: "HOLD", persistCycleRemaining: 0 };
+  }
+
+  // ── 중립 (-0.2 ≤ score ≤ 0.2) ──
+  return { state: "HOLD", persistCycleRemaining: 0 };
 }
 
 /**
@@ -297,6 +325,11 @@ export function runAnalysisEngine(
     data,
     prevPersistCycle
   );
+
+  // finalVerdict ↔ marketState 정합성 동기화
+  if (marketState === "BEARISH_CAUTION") {
+    finalVerdict = "하락주의";
+  }
 
   return {
     experts,

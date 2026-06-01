@@ -1,6 +1,6 @@
 import type { IndicatorsResult } from "./indicators.js";
 
-export type OpinionType = "상승" | "하락" | "기록없음" | "횡보/보합";
+export type OpinionType = "상승" | "하락" | "기록없음" | "횡보/보합" | "하락주의";
 
 export interface ExpertOpinion {
   expertName: string;

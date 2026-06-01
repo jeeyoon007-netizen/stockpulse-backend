@@ -1,6 +1,7 @@
 {
   "name": "stockpulse-backend",
   "version": "1.0.0",
+  "type": "module",
   "description": "Backend API server for StockPulse",
   "main": "dist/server.js",
   "scripts": {
