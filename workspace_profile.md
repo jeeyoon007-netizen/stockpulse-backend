@@ -58,40 +58,13 @@ graph TD
     %% 서버 내부 영역
     subgraph StockPulse Backend Server
         Scheduler[70초 주기 수집 스케줄러]
-        Auth[KIS Auth Manager: token 캐싱/재사용]
-        Parser[KIS & ECOS Parsers: 데이터 변환]
-        Cache[(Global In-memory Cache)]
-        WS_Server[WebSocket Server ws://...]
-        REST_Server[Express REST API Server]
-    end
-
-    %% 클라이언트 영역
-    subgraph Clients
-        WS_Client[WebSocket Clients]
-        REST_Client[REST Fallback Clients]
-    end
-
-    %% 데이터 흐름 정의
-    Scheduler -->|1. 토큰 요청| Auth
-    Auth -->|2. 토큰 반환| Scheduler
-    Scheduler -->|3. 원시 데이터 Fetch| External APIs
-    External APIs -->|4. 응답 데이터| Parser
-    Parser -->|5. 구조화된 데이터| Cache
-    Cache -->|6. 업데이트 브로드캐스트| WS_Server
-    WS_Server -->|실시간 전송| WS_Client
-    Cache -->|REST 응답| REST_Server
-    REST_Server -->|폴백 요청| REST_Client
-
-    %% 에러 처리 알림
-    Scheduler -.->|에러 발생 시 Kakao Alert| Alert[Kakao Alert Sender]
-```
-
-### 핵심 수집 및 캐싱 주기
+    ### 핵심 수집 및 캐싱 주기
 1. **시장 지수 (Major Indices, 70초 주기):** 코스피(`0001`), 코스닥(`1001`), 코스피200(`2001`), 원/달러 환율 (ECOS).
-2. **카나리아 데이터 (Canary Data, 70초 주기):** 증시자금 동향 (고객예탁금, 신용융자잔고, 미수금), 코스피 52주 신고가 종목 수, KOSPI/KOSDAQ ADR (외부 `adrinfo.kr` 사이트 크롤링 기준 과열/과매도 판별).
+2. **카나리아 데이터 (Canary Data, 70초 주기):** 증시자금 동향 (고객예탁금, 신용융자잔고, 미수금), KRX 전종목 시가총액 합산, KOSPI/KOSDAQ ADR (외부 `adrinfo.kr` 사이트 크롤링 기준 과열/과매도 판별 - *현재 ADR 크롤링은 Render IP 차단으로 인해 프론트엔드 연계 방식으로 위임됨*).
 3. **공포탐욕지수 (Fear & Greed Index, 70초 주기):** 국내(KR) 및 미국(US) 시장의 공포 탐욕 지수 수집.
-4. **외인/기관 수급 데이터 (Investor Flow, 70초 주기):** 코스피 기준 외국인/기관 순매수 상위 10개 종목 정보.
+4. **외인/기관 수급 데이터 (Investor Flow, 70초 주기):** 코스피 및 코스닥 기준 외국인/기관 순매수 상위 10개 종목 정보, 닉네임 기반 연속 매수 일수(badge) 계산 및 업종 집중도 분석.
 5. **매크로 자금동향 DB 누적 (Daily 16:00 주기):** KIS 증시자금추이를 기반으로 `market_funds_history`, `market_credit_history` Supabase 테이블에 일별 데이터 기록 (Phase 2).
+6. **장마감 자동 백테스트 배치 (Daily 15:40 주기):** 활성 백테스트 타겟 종목(최대 150종목)의 1년치 일봉 OHLCV 데이터를 순차 수집 및 분석 후 `backtest_results`, `backtest_trades` 테이블에 자동 캐싱 (Phase 3).
 
 ---
 
@@ -104,13 +77,27 @@ graph TD
 ├── .env                        # KIS_APP_KEY, KIS_APP_SECRET, BOK_API_KEY, PORT 등 설정
 ├── Dockerfile                  # 배포용 Docker 설정
 ├── tsconfig.json               # ES2022 및 NodeNext 모듈 해석용 TS 설정
-├── package.json                # tsx (실행), typescript (빌드), ws, express, axios 의존성
+├── package.json                # 의존성 정의 (technicalindicators, ws, express 등)
+├── supabase_phase2.sql         # Supabase Phase 2 매크로 자금동향 테이블 정의
+├── supabase_phase3.sql         # Supabase Phase 3 백테스트 및 관심종목 테이블 정의
 ├── src/
-│   ├── server.ts               # Express & ws 서버 통합, 70초 스케줄링 루프, GlobalCache 관리
+│   ├── server.ts               # Express & WebSocket 서버, 70초 수집 스케줄러, Cron 스케줄러, REST API 엔드포인트
 │   ├── api/
 │   │   ├── kis.ts              # KIS API 토큰 관리 (OAuth 2.0 발급, 인메모리 캐싱, 중복 요청 방지)
 │   │   ├── kis-market.ts       # KIS 및 BOK API 데이터 fetch 함수 모음
+│   │   ├── kis-stock-ohlcv.ts  # 개별 종목의 OHLCV 일봉 수집 (Pagination 및 거래정지 예외 처리 적용)
 │   │   ├── feargreed.ts        # 공포탐욕지수 fetch 함수 및 타입 인터페이스
+│   │   ├── badge-service.ts    # 연속 매수 일수 기반 수급 뱃지 계산 로직
+│   │   ├── krx-market-cap.ts   # KRX 전종목 시세를 시장별로 받아 시가총액을 합산 (비영업일 자동 백트래킹 적용)
+│   │   ├── datetime.ts         # 타임존에 독립적인 KST 날짜/시간 처리 헬퍼
+│   │   ├── stocks.json         # 한글 종목명 분석용 전종목 코드-종목명 데이터
+│   │   ├── supabase.ts         # Supabase JS Client 초기화 및 바인딩
+│   │   ├── analysis/           # 계량적 주식 분석 엔진 및 백테스팅 파이프라인
+│   │   │   ├── indicators.ts   # 롤링 지표 계산 (SMA, MFI, VWAP, RSI, ADX, ATR)
+│   │   │   ├── experts.ts      # 3인의 AI 전문가(추세, 에너지, 모멘텀) 의견 생성
+│   │   │   ├── engine.ts       # 입체 주식 분석 오케스트레이터 및 Veto 거부권 검증
+│   │   │   ├── macro.ts        # 신용잔고 및 예탁금 기반 거시 시장 상태 평가
+│   │   │   └── backtest.ts     # RSI 스윙 및 골든크로스 등 복리 연산 기반 백테스터
 │   │   └── parsers/
 │   │       └── kis_parser.ts   # KIS/ECOS 원시 응답을 StockPulse 공통 포맷으로 매핑 (Pure Functions)
 │   ├── utils/
@@ -118,11 +105,10 @@ graph TD
 │   └── (Test Scripts)          # 개발 및 진단용 독립 스크립트 모음
 │       ├── test_adr.ts         # 지수 일별 차트 API 테스트
 │       ├── test_adr2.ts        # 지수 일별 시세 API 테스트
-│       ├── test_canary.ts      # 신용잔고, 신고가, ADR 등 카나리아 통합 API 검증
+│       ├── test_canary.ts      # 신용잔고, ADR 등 카나리아 통합 API 검증
 │       ├── test_krx.ts         # KRX 데이터 포털 직접 스크래핑 테스트
-│       ├── test_newhigh_all.ts # 52주 신고가 API 테스트
-│       ├── test_newhigh_by_sector.py # 52주 신고가 종목수 및 업종별 집계 Python 스크립트 (2차 정밀 필터링 적용)
-│       └── test_raw_canary.ts  # 증시자금동향 및 신용잔고 원시 응답 검증
+│       ├── test_raw_canary.ts  # 증시자금동향 및 신용잔고 원시 응답 검증
+│       └── test_consecutive_badges.ts # 연속 순매수 일수 및 수급 뱃지 생성 로직 검증
 └── test_harness/
     └── test_krx_parsers.ts     # KIS & ECOS 파서 오프라인 Mock 테스트 하네스
 ```
@@ -133,11 +119,20 @@ graph TD
 > 현재 모든 시장 연동은 공식 OpenAPI인 **`kis_parser.ts`** 기반으로 이관되었으며, 이에 맞추어 오프라인 테스트 하네스 또한 **`test_harness/test_krx_parsers.ts`**로 새롭게 교체(Integration)되었습니다.
 
 > [!IMPORTANT]
-> **52주 신고가 집계 방식 정밀화 권장 (2차 필터링 도입)**
-> KIS OpenAPI `near_new_highlow` 호출 시, 단순히 응답 배열의 길이(`totalItems.length`)만 집계하는 방식은 KIS API 내부 연산 오차(반올림 및 캐싱)로 인해 신고가 괴리율이 0%를 소폭 초과하는 종목까지 포함될 우려가 있습니다.
-> 향후 스케줄러 수집기 리팩토링 시, 응답 데이터 내 `현재가(stck_prpr) === 52주 최고가(new_hgpr)` 조건 또는 `괴리율(hprc_near_rate) === '0.00'` 검증을 거치는 **2차 정밀 필터링(Defensive Filtering)** 방식을 적극 적용하도록 권장하며, 관련 구현은 [test_newhigh_by_sector.py](file:///c:/Users/jeeyo/OneDrive/바탕 화면/study/backend/src/test_newhigh_by_sector.py)를 참고하십시오.
+> **Phase 3 백테스팅 및 관심 종목 파이프라인 탑재**
+> - `/api/v1/watchlist/add`, `/api/v1/watchlist/remove`, `/api/v1/watchlist/list` 엔드포인트를 구현하여 유저별 닉네임 기반 관심 종목 데이터(`watchlists`)를 관리합니다.
+> - 백테스트 자동 스케줄러 배치 타겟(`backtest_targets`)은 LRU 정책(최대 150종목)을 유지하며, 14일 이상 미조회 시 자동 삭제 처리됩니다.
+> - `/api/v1/analysis/backtest`를 통해 RSI 스윙 및 단/장기 골든크로스 등 복리 누적수익률과 최대낙폭(MDD)을 실시간 또는 Supabase 캐시 기반으로 안전하게 내려줍니다.
 
----
+> [!TIP]
+> **stocks.json을 활용한 종목명 해석 및 클라이언트 제공 이름 방어**
+> - KIS API 호출 결과 및 관심 종목 추가 시 종목명 유실 방지를 위해 로컬 `stocks.json` 파일 기반의 `getStockName` 해석기를 탑재했습니다.
+> - 프론트엔드가 자체적으로 파악한 종목명이 존재할 경우, 클라이언트 제공 이름(`stock_name`)을 우선 채택하여 백엔드 누락 문제를 원천 차단합니다.
+
+> [!TIP]
+> **KRX 정보데이터시스템 세션 로그인 자동화 지원**
+> - 비공식 웹 크롤링 시 발생하는 `400 LOGOUT` 차단 방어를 위해, `pykrx`와 동일한 방식의 **세션 로그인 자동화 모듈**을 탑재했습니다.
+> - 시스템 환경변수에 `KRX_ID`와 `KRX_PW`가 설정되어 있는 경우, `MDCCOMS001D1.cmd` 엔드포인트를 통해 로그인 세션(`JSESSIONID`)을 자동으로 발급 및 2시간 동안 캐싱하여 시가총액을 안전하게 크롤링해 옵니다.
 
 ## 3. Data Contracts & Type Schemas (AI 데이터 스키마 계약)
 
@@ -189,17 +184,21 @@ export interface CanaryData {
     amount: number;
     ratio: number;                // 전일 대비 증감율 (%)
   }[];
-  adrKospi: {                     // KOSPI ADR (adrinfo.kr 연계)
-    adr: string;                  // ADR 수치 (예: "70.27")
-    time: string;                 // 수집/업데이트 시각 (예: "2026-05-22 (15:30)")
-    signal: "매도 검토 (과열)" | "바닥권 신호 (과매도)" | "중립" | "데이터 부족" | string;
+  adrKospi: null;                 // ADR: Vercel 프론트에서 연계 처리
+  adrKosdaq: null;                // ADR: Vercel 프론트에서 연계 처리
+  creditDepositRatio: number | null; // 신용잔고 / 예탁금 비율 (%)
+  creditMarketCapRatio: number | null; // 신용잔고 / 전체 시가총액 비율 (%)
+  marketCaps: {                   // KOSPI & KOSDAQ 전체 시가총액
+    kospi: number;
+    kosdaq: number;
+    asOf?: string;
+    estimated?: boolean;
   } | null;
-  adrKosdaq: {                    // KOSDAQ ADR (adrinfo.kr 연계)
-    adr: string;                  // ADR 수치 (예: "66.21")
-    time: string;                 // 수집/업데이트 시각 (예: "2026-05-22 (15:30)")
-    signal: "매도 검토 (과열)" | "바닥권 신호 (과매도)" | "중립" | "데이터 부족" | string;
+  macroAnalysis: {                // 거시 시장 상태 평가 결과
+    verdict: string;
+    description: string;
+    riskScore: number;
   } | null;
-  newHighCount: number;           // 52주 신고가 종목 수 합산 (코스피 + 코스닥)
 }
 
 // 3. 투자자별 순매수 데이터 포맷
@@ -212,6 +211,59 @@ export interface InvestorFlowData {
   changePercent: number;          // 변동률
   volume: number;                 // 누적 거래량
   amount: number;                 // 순매수 대금 (원화 환산 완료, * 1,000,000)
+  badge?: string;                 // 연속 매매 뱃지 (예: "기관 3일 연속 매수", "외인/기관 쌍끌이 5일")
+}
+
+// 4. 개별 종목 분석 엔진 결과 포맷 (Analysis Engine)
+export interface AIAnalysisResult {
+  experts: {
+    expertName: string;
+    opinion: "상승" | "하락" | "횡보/보합" | "하락주의";
+    confidence: number;
+    reason: string;
+  }[];
+  auditLogs: {
+    step: number;
+    expertName: string;
+    message: string;
+    vetoTriggered?: boolean;
+    vetoSource?: string;
+  }[];
+  strategy: {
+    currentPrice: number;
+    entryRange: string;
+    stopLoss: number;
+    targetPrimary: number;
+    targetSecondary: number;
+  };
+  finalVerdict: "상승" | "하락" | "횡보/보합" | "하락주의";
+  weightedScore: number;
+  mode: "scalp" | "swing" | "position";
+  veto: {
+    triggered: boolean;
+    priority: "P1" | "P2" | null;
+    reason: string;
+    source: string;
+    forcedState: "EXIT_PRIORITY" | "HOLD" | null;
+  };
+  marketState: "AGGRESSIVE_LONG" | "CAUTIOUS_LONG" | "MODERATE_LONG" | "HOLD" | "BEARISH_CAUTION" | "EXIT_PRIORITY";
+  marketStateLabel: string;
+  persistCycleRemaining: number;
+}
+
+// 5. 백테스팅 결과 포맷 (Backtest Result)
+export interface StrategyResult {
+  strategy_name: string;          // 예: "RSI 스윙 (30/70)", "골든크로스 돌파"
+  strategy_desc: string;
+  win_rate: number;               // 승률 (%)
+  total_return: number;           // 복리 누적수익률 (%)
+  mdd: number;                    // 최대 낙폭 (%)
+  trade_count: number;            // 총 거래 횟수
+  trades: {
+    trade_date: string;           // YYYY-MM-DD
+    action: "Buy" | "Sell";
+    price: number;
+  }[];
 }
 ```
 
