@@ -102,3 +102,46 @@ export function calculateIndicators(ohlcvs: OHLCV[]): IndicatorsResult {
     adxHistory,
   };
 }
+
+export interface RollingIndicators {
+  sma5: (number | null)[];
+  sma20: (number | null)[];
+  sma60: (number | null)[];
+  rsi: (number | null)[];
+  mfi: (number | null)[];
+  vwap: (number | null)[];
+}
+
+/**
+ * 백테스트용: 전체 OHLCV 기간에 대한 롤링 지표를 계산하고 원본 배열 길이에 맞게 패딩(null)하여 반환합니다.
+ */
+export function calculateRollingIndicators(ohlcvs: OHLCV[]): RollingIndicators {
+  const highs = ohlcvs.map((d) => d.high);
+  const lows = ohlcvs.map((d) => d.low);
+  const closes = ohlcvs.map((d) => d.close);
+  const volumes = ohlcvs.map((d) => d.volume);
+
+  const pad = (arr: number[], length: number) => {
+    const padding = new Array(length - arr.length).fill(null);
+    return [...padding, ...arr];
+  };
+
+  const sma5Arr = SMA.calculate({ period: 5, values: closes });
+  const sma20Arr = SMA.calculate({ period: 20, values: closes });
+  const sma60Arr = SMA.calculate({ period: 60, values: closes });
+  const rsiArr = RSI.calculate({ values: closes, period: 14 });
+  const mfiArr = MFI.calculate({ high: highs, low: lows, close: closes, volume: volumes, period: 14 });
+  const vwapArr = VWAP.calculate({ high: highs, low: lows, close: closes, volume: volumes });
+
+  const L = ohlcvs.length;
+
+  return {
+    sma5: pad(sma5Arr, L),
+    sma20: pad(sma20Arr, L),
+    sma60: pad(sma60Arr, L),
+    rsi: pad(rsiArr, L),
+    mfi: pad(mfiArr, L),
+    vwap: pad(vwapArr, L),
+  };
+}
+

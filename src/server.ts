@@ -19,10 +19,11 @@ import { fetchAndStoreInvestorFlow } from './api/kis-investor-daily.js';
 import { calcConsecutiveDays, getSupplyBadge } from './api/badge-service.js';
 import { supabase } from './api/supabase.js';
 import cron from 'node-cron';
-import { fetchStockOHLCV } from './api/kis-stock-ohlcv.js';
+import { fetchStockOHLCV, getStockName } from './api/kis-stock-ohlcv.js';
 import { runAnalysisEngine, type AnalysisMode } from './api/analysis/engine.js';
 import { fetchMarketCap } from './api/krx-market-cap.js';
 import { calculateMacroIndicators } from './api/analysis/macro.js';
+import { runBacktest } from './api/analysis/backtest.js';
 
 // 날짜 포맷팅 헬퍼 (YYYYMMDD)
 function getTodayDateStr(): string {
@@ -233,6 +234,167 @@ app.post('/api/v1/analysis/run', async (req, res) => {
   } catch (error: any) {
     console.error(`[ANALYSIS ERROR] ${code}: ${error.message}`);
     res.status(500).json({ success: false, error: error.message || "알 수 없는 에러가 발생했습니다." });
+  }
+});
+
+// ===== 관심 종목 추가 및 LRU 관리 엔드포인트 =====
+app.post('/api/v1/watchlist/add', async (req, res) => {
+  const { nickname, stock_code, stock_name } = req.body;
+  if (!nickname || !stock_code || !stock_name) {
+    return res.status(400).json({ success: false, error: "nickname, stock_code, stock_name이 필요합니다." });
+  }
+  if (!supabase) {
+    return res.status(500).json({ success: false, error: "DB 연결 오류" });
+  }
+
+  const resolvedStockName = (stock_name === "검색된 종목" || !stock_name)
+    ? getStockName(stock_code)
+    : stock_name;
+
+  try {
+    // 1. 유저 개인 관심종목에 추가
+    await supabase.from('watchlists').upsert(
+      { nickname, stock_code, stock_name: resolvedStockName }, 
+      { onConflict: 'nickname, stock_code' }
+    );
+
+    // 2. 글로벌 백테스트 타겟에 추가 (조회시간 갱신)
+    await supabase.from('backtest_targets').upsert(
+      { stock_code, stock_name: resolvedStockName, last_viewed_at: new Date().toISOString() },
+      { onConflict: 'stock_code' }
+    );
+
+    // 3. 글로벌 150개 LRU 정리
+    const { count } = await supabase.from('backtest_targets').select('*', { count: 'exact', head: true });
+    if (count && count > 150) {
+      // 가장 오래된 것들 조회해서 삭제
+      const limit = count - 150;
+      const { data: oldest } = await supabase.from('backtest_targets')
+        .select('stock_code')
+        .order('last_viewed_at', { ascending: true })
+        .limit(limit);
+      
+      if (oldest && oldest.length > 0) {
+        const codesToDelete = oldest.map(o => o.stock_code);
+        await supabase.from('backtest_targets').delete().in('stock_code', codesToDelete);
+      }
+    }
+
+    res.json({ success: true, message: "관심 종목 추가 및 타겟 갱신 완료" });
+  } catch (err: any) {
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+app.post('/api/v1/watchlist/remove', async (req, res) => {
+  const { nickname, stock_code } = req.body;
+  if (!nickname || !stock_code) {
+    return res.status(400).json({ success: false, error: "nickname, stock_code가 필요합니다." });
+  }
+  if (!supabase) return res.status(500).json({ success: false, error: "DB 연결 오류" });
+
+  try {
+    await supabase.from('watchlists').delete().match({ nickname, stock_code });
+    res.json({ success: true, message: "관심 종목 삭제 완료" });
+  } catch (err: any) {
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+app.get('/api/v1/watchlist/list', async (req, res) => {
+  const nickname = req.query.nickname as string;
+  if (!nickname) {
+    return res.status(400).json({ success: false, error: "nickname 파라미터가 필요합니다." });
+  }
+  if (!supabase) return res.status(500).json({ success: false, error: "DB 연결 오류" });
+
+  try {
+    const { data: watchlists, error } = await supabase
+      .from('watchlists')
+      .select('stock_code, stock_name')
+      .eq('nickname', nickname);
+    
+    if (error) throw error;
+
+    // 백테스트 결과도 조인해서 내려주면 좋지만 편의상 따로 요청하게 하거나 여기서 매핑
+    // 일단 종목 리스트만 반환하고, UI에서 상세 정보를 요청하도록 함
+    res.json({ success: true, data: watchlists || [] });
+  } catch (err: any) {
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+// 백테스트 결과 조회 엔드포인트 (없으면 실시간 계산 후 캐싱)
+app.get('/api/v1/analysis/backtest', async (req, res) => {
+  const stock_code = req.query.code as string;
+  if (!stock_code) return res.status(400).json({ success: false, error: "code가 필요합니다." });
+  if (!supabase) return res.status(500).json({ success: false, error: "DB 연결 오류" });
+
+  try {
+    let { data, error } = await supabase.from('backtest_results').select('*').eq('stock_code', stock_code).single();
+    if (error && error.code !== 'PGRST116') throw error; // Not found error
+    
+    let tradesData: any[] = [];
+
+    if (!data) {
+      console.log(`[BACKTEST ON-DEMAND] No cached backtest for ${stock_code}. Running real-time backtest...`);
+      try {
+        // 1년치 KIS 데이터를 조회
+        const stockData = await fetchStockOHLCV(stock_code, 240);
+        // 백테스트 연산 수행
+        const result = runBacktest(stockData.ohlcv);
+        
+        // 결과 캐싱 (DB Upsert)
+        const upsertObj = {
+          stock_code: stock_code,
+          best_strategy_name: result.strategy_name,
+          best_strategy_desc: result.strategy_desc,
+          win_rate: result.win_rate,
+          total_return: result.total_return,
+          mdd: result.mdd,
+          trade_count: result.trade_count,
+          analyzed_at: new Date().toISOString()
+        };
+        
+        const { data: upsertedData, error: upsertError } = await supabase
+          .from('backtest_results')
+          .upsert(upsertObj, { onConflict: 'stock_code' })
+          .select()
+          .single();
+
+        if (upsertError) throw upsertError;
+        data = upsertedData;
+
+        // 가상 매매 타점 저장
+        if (result.trades && result.trades.length > 0) {
+          await supabase.from('backtest_trades').delete().eq('stock_code', stock_code);
+          const tradesToInsert = result.trades.map(t => ({
+            stock_code: stock_code,
+            trade_date: t.trade_date,
+            action: t.action,
+            price: t.price
+          }));
+          const { data: insertedTrades, error: tradesError } = await supabase
+            .from('backtest_trades')
+            .insert(tradesToInsert)
+            .select();
+          
+          if (tradesError) throw tradesError;
+          tradesData = insertedTrades || [];
+        }
+      } catch (err: any) {
+        console.error(`[BACKTEST ON-DEMAND ERROR] ${stock_code}:`, err.message);
+        return res.json({ success: true, data: null });
+      }
+    } else {
+      // 기존 저장된 타점 조회
+      const { data: trades } = await supabase.from('backtest_trades').select('*').eq('stock_code', stock_code);
+      tradesData = trades || [];
+    }
+    
+    res.json({ success: true, data: { ...data, trades: tradesData } });
+  } catch (err: any) {
+    res.status(500).json({ success: false, error: err.message });
   }
 });
 
@@ -500,10 +662,81 @@ server.listen(PORT, () => {
 // YYYY-MM-DD 형식의 오늘 날짜 구하기
 const todayStr = new Date().toISOString().split('T')[0];
 
-// 스케줄러: 매일 오후 15시 40분에 실행 (월~금)
+// 스케줄러: 매일 오후 15시 40분에 실행 (월~금) - 백테스팅 및 분석 캐싱 배치
 cron.schedule('40 15 * * 1-5', async () => {
-  console.log('[CRON] 장마감 자동 분석 스케줄러 실행 (15:40)');
-  // 추후 전 종목 또는 관심 종목 리스트를 불러와서 자동 분석을 돌리는 로직 추가
+  console.log('[CRON] 장마감 자동 백테스트 스케줄러 실행 (15:40)');
+  if (!supabase) {
+    console.error('[CRON] Supabase client not initialized.');
+    return;
+  }
+
+  try {
+    // 1. 2주 이상 미조회된 타겟 자동 삭제 (Clean-up)
+    const twoWeeksAgo = new Date();
+    twoWeeksAgo.setDate(twoWeeksAgo.getDate() - 14);
+    await supabase.from('backtest_targets').delete().lt('last_viewed_at', twoWeeksAgo.toISOString());
+    console.log('[CRON] 2주 미조회 종목 정리 완료');
+
+    // 2. 백테스트 타겟 목록 조회 (최대 150개)
+    const { data: targets, error } = await supabase.from('backtest_targets').select('stock_code, stock_name');
+    if (error || !targets) {
+      console.error('[CRON] 타겟 조회 실패:', error?.message);
+      return;
+    }
+
+    console.log(`[CRON] 총 ${targets.length}개 종목 백테스트 시작...`);
+
+    const delay = (ms: number) => new Promise(r => setTimeout(r, ms));
+
+    for (let i = 0; i < targets.length; i++) {
+      const { stock_code, stock_name } = targets[i];
+      try {
+        console.log(`[CRON] (${i+1}/${targets.length}) ${stock_name}(${stock_code}) 분석 중...`);
+        
+        // 1년치 데이터 가져오기 (API 호출)
+        const stockData = await fetchStockOHLCV(stock_code, 240);
+        
+        // 백테스트 실행
+        const result = runBacktest(stockData.ohlcv);
+        
+        // 결과 캐싱 (DB Upsert)
+        await supabase.from('backtest_results').upsert({
+          stock_code: stock_code,
+          best_strategy_name: result.strategy_name,
+          best_strategy_desc: result.strategy_desc,
+          win_rate: result.win_rate,
+          total_return: result.total_return,
+          mdd: result.mdd,
+          trade_count: result.trade_count,
+          analyzed_at: new Date().toISOString()
+        }, { onConflict: 'stock_code' });
+
+        // (선택) 가상 매매 타점을 backtest_trades에 저장하여 차트에 표시할 수도 있음.
+        // 현재는 최적 전략의 trades를 저장
+        if (result.trades && result.trades.length > 0) {
+          // 기존 타점 삭제 후 새로 추가
+          await supabase.from('backtest_trades').delete().eq('stock_code', stock_code);
+          const tradesToInsert = result.trades.map(t => ({
+            stock_code: stock_code,
+            trade_date: t.trade_date,
+            action: t.action,
+            price: t.price
+          }));
+          await supabase.from('backtest_trades').insert(tradesToInsert);
+        }
+
+      } catch (err: any) {
+        console.error(`[CRON] ${stock_name}(${stock_code}) 백테스트 에러:`, err.message);
+      }
+      
+      // KIS API 한도(초당 20건)를 고려하여 종목당 0.5초 대기
+      await delay(500);
+    }
+
+    console.log('[CRON] 장마감 자동 백테스트 스케줄러 완료');
+  } catch (error: any) {
+    console.error('[CRON] 백테스트 스케줄러 치명적 에러:', error.message);
+  }
 });
 
 // 스케줄러: 매일 오후 16시 00분에 실행 (월~금) - 매크로 자금동향 데이터 누적

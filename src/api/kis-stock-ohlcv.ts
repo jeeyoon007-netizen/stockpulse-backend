@@ -1,4 +1,35 @@
 import { getAccessToken, KIS_BASE_URL, formatYYYYMMDD } from './kis.js';
+import fs from 'fs';
+import path from 'path';
+import { fileURLToPath } from 'url';
+
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
+
+let stockNameMap: Map<string, string> | null = null;
+
+export function getStockName(code: string): string {
+  if (!stockNameMap) {
+    stockNameMap = new Map();
+    try {
+      const filePath = path.join(__dirname, 'stocks.json');
+      if (fs.existsSync(filePath)) {
+        const fileContent = fs.readFileSync(filePath, 'utf-8');
+        const stocks = JSON.parse(fileContent);
+        if (Array.isArray(stocks)) {
+          for (const s of stocks) {
+            if (s.code && s.name) {
+              stockNameMap.set(s.code, s.name);
+            }
+          }
+        }
+      }
+    } catch (err) {
+      console.error("Failed to load stocks.json in backend name resolver:", err);
+    }
+  }
+  return stockNameMap.get(code) || "검색된 종목";
+}
 
 export class AnalysisError extends Error {
   constructor(message: string) {
@@ -143,7 +174,7 @@ export async function fetchStockOHLCV(code: string, daysRequired = 240): Promise
 
   return {
     code,
-    name: "검색된 종목",
+    name: getStockName(code),
     currentPrice,
     change,
     changePercent: parseFloat(changePercent.toFixed(2)),
