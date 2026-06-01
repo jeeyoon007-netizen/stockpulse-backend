@@ -21,14 +21,13 @@ export interface StrategyResult {
 function simulateRSISwing(ohlcvs: OHLCV[], rsiArr: (number | null)[], rsiBuy: number, rsiSell: number): StrategyResult {
   let inPosition = false;
   let buyPrice = 0;
-  let totalReturn = 0;
   let wins = 0;
   let tradesCount = 0;
   const trades: Trade[] = [];
 
+  let closedEquity = 1; // 청산 기준 복리 자산 (T5)
   let peakEquity = 1;
   let maxDrawdown = 0;
-  let currentEquity = 1;
 
   for (let i = 1; i < ohlcvs.length; i++) {
     const today = ohlcvs[i];
@@ -44,18 +43,17 @@ function simulateRSISwing(ohlcvs: OHLCV[], rsiArr: (number | null)[], rsiBuy: nu
     } else if (inPosition && (todayRSI >= rsiSell || i === ohlcvs.length - 1)) {
       const sellPrice = today.close;
       const tradeReturn = (sellPrice - buyPrice) / buyPrice;
-      totalReturn += tradeReturn;
-      currentEquity *= (1 + tradeReturn);
-      
+      closedEquity *= (1 + tradeReturn);
       if (tradeReturn > 0) wins++;
       tradesCount++;
-      
       trades.push({ trade_date: today.date, action: 'Sell', price: sellPrice });
       inPosition = false;
     }
 
-    if (currentEquity > peakEquity) peakEquity = currentEquity;
-    const drawdown = (peakEquity - currentEquity) / peakEquity;
+    // T6: 매 봉 mark-to-market으로 MDD 계산 (보유 중 미실현 손실 반영)
+    const mtmEquity = inPosition ? closedEquity * (today.close / buyPrice) : closedEquity;
+    if (mtmEquity > peakEquity) peakEquity = mtmEquity;
+    const drawdown = (peakEquity - mtmEquity) / peakEquity;
     if (drawdown > maxDrawdown) maxDrawdown = drawdown;
   }
 
@@ -65,7 +63,7 @@ function simulateRSISwing(ohlcvs: OHLCV[], rsiArr: (number | null)[], rsiBuy: nu
     strategy_name: `RSI 스윙 (${rsiBuy}/${rsiSell})`,
     strategy_desc: `RSI가 ${rsiBuy} 상향 돌파 시 매수, ${rsiSell} 이상 도달 시 매도하는 전략입니다.`,
     win_rate: Number(win_rate.toFixed(1)),
-    total_return: Number((totalReturn * 100).toFixed(2)),
+    total_return: Number(((closedEquity - 1) * 100).toFixed(2)), // T5: 복리 누적수익률
     mdd: Number((maxDrawdown * 100).toFixed(2)),
     trade_count: tradesCount,
     trades
@@ -76,14 +74,13 @@ function simulateRSISwing(ohlcvs: OHLCV[], rsiArr: (number | null)[], rsiBuy: nu
 function simulateMACross(ohlcvs: OHLCV[], shortMa: (number | null)[], longMa: (number | null)[]): StrategyResult {
   let inPosition = false;
   let buyPrice = 0;
-  let totalReturn = 0;
   let wins = 0;
   let tradesCount = 0;
   const trades: Trade[] = [];
 
+  let closedEquity = 1; // 청산 기준 복리 자산 (T5)
   let peakEquity = 1;
   let maxDrawdown = 0;
-  let currentEquity = 1;
 
   for (let i = 1; i < ohlcvs.length; i++) {
     const today = ohlcvs[i];
@@ -101,18 +98,17 @@ function simulateMACross(ohlcvs: OHLCV[], shortMa: (number | null)[], longMa: (n
     } else if (inPosition && (todayShort < todayLong || i === ohlcvs.length - 1)) {
       const sellPrice = today.close;
       const tradeReturn = (sellPrice - buyPrice) / buyPrice;
-      totalReturn += tradeReturn;
-      currentEquity *= (1 + tradeReturn);
-      
+      closedEquity *= (1 + tradeReturn);
       if (tradeReturn > 0) wins++;
       tradesCount++;
-      
       trades.push({ trade_date: today.date, action: 'Sell', price: sellPrice });
       inPosition = false;
     }
 
-    if (currentEquity > peakEquity) peakEquity = currentEquity;
-    const drawdown = (peakEquity - currentEquity) / peakEquity;
+    // T6: 매 봉 mark-to-market으로 MDD 계산 (보유 중 미실현 손실 반영)
+    const mtmEquity = inPosition ? closedEquity * (today.close / buyPrice) : closedEquity;
+    if (mtmEquity > peakEquity) peakEquity = mtmEquity;
+    const drawdown = (peakEquity - mtmEquity) / peakEquity;
     if (drawdown > maxDrawdown) maxDrawdown = drawdown;
   }
 
@@ -122,7 +118,7 @@ function simulateMACross(ohlcvs: OHLCV[], shortMa: (number | null)[], longMa: (n
     strategy_name: `골든크로스 돌파`,
     strategy_desc: `단기 이평선이 장기 이평선을 상향 돌파 시 매수, 하향 이탈 시 매도하는 전략입니다.`,
     win_rate: Number(win_rate.toFixed(1)),
-    total_return: Number((totalReturn * 100).toFixed(2)),
+    total_return: Number(((closedEquity - 1) * 100).toFixed(2)), // T5: 복리 누적수익률
     mdd: Number((maxDrawdown * 100).toFixed(2)),
     trade_count: tradesCount,
     trades

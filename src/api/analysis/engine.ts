@@ -71,6 +71,9 @@ export interface AIAnalysisResult {
 
 type WeightProfile = { trend: number; energy: number; momentum: number };
 
+// T12b: veto와 classifyMarketState가 동일 임계값을 참조하도록 상수화
+const VETO_SCORE_THRESHOLD = 0.6;
+
 function checkVeto(data: IndicatorsResult): VetoResult {
   if (data.rsi > 78) return {
     triggered: true, priority: 'P1',
@@ -84,11 +87,18 @@ function checkVeto(data: IndicatorsResult): VetoResult {
     source: `MFI=${data.mfi.toFixed(1)}, VWAP 이탈`,
     forcedState: 'EXIT_PRIORITY'
   };
-  if (data.lastClose < data.sma60) return {
+  // T12a: 살짝 이탈만으로 P1 강제 EXIT 방지 — 2% 이상 이탈 시에만 P1, 미만은 P2로 강등
+  if (data.lastClose < data.sma60 * 0.98) return {
     triggered: true, priority: 'P1',
-    reason: `60일 이동평균선 하방 이탈 — 추세 구조 붕괴`,
-    source: `SMA60 이탈 (${data.lastClose} < ${data.sma60.toFixed(0)})`,
+    reason: `60일 이동평균선 2% 이상 하방 이탈 — 추세 구조 붕괴`,
+    source: `SMA60 이탈 (${data.lastClose} < ${data.sma60.toFixed(0)}×0.98)`,
     forcedState: 'EXIT_PRIORITY'
+  };
+  if (data.lastClose < data.sma60) return {
+    triggered: true, priority: 'P2',
+    reason: `60일 이동평균선 하방 근접 이탈 — 추세 약화 주의`,
+    source: `SMA60 근접 이탈 (${data.lastClose} < ${data.sma60.toFixed(0)})`,
+    forcedState: 'HOLD'
   };
   if (data.adx < 15) return {
     triggered: true, priority: 'P2',
@@ -220,12 +230,12 @@ export function classifyMarketState(
   }
 
   // P2 Veto: 추세 약하면 HOLD 강제
-  if (veto.triggered && veto.priority === 'P2' && Math.abs(weightedScore) < 0.6) {
+  if (veto.triggered && veto.priority === 'P2' && Math.abs(weightedScore) < VETO_SCORE_THRESHOLD) {
     return { state: "HOLD", persistCycleRemaining: 0 };
   }
 
-  // 히스테리시스: 최근 5개 RSI 모두 임계값 초과해야 과열 인정
-  const rsiConsistentlyHigh = data.rsiHistory.every(r => r > 65);
+  // 히스테리시스: 최근 5개 RSI 모두 임계값 초과해야 과열 인정 (빈 배열이면 vacuous true 방지)
+  const rsiConsistentlyHigh = data.rsiHistory.length > 0 && data.rsiHistory.every(r => r > 65);
 
   // ── 상승 영역 (weightedScore > 0.2) ──
   if (weightedScore > 0.2) {
@@ -299,7 +309,7 @@ export function runAnalysisEngine(
     
     if (veto.priority === 'P1') {
       finalVerdict = "하락";
-    } else if (veto.priority === 'P2' && Math.abs(weightedScore) < 0.6) {
+    } else if (veto.priority === 'P2' && Math.abs(weightedScore) < VETO_SCORE_THRESHOLD) {
       finalVerdict = "횡보/보합";
     }
 

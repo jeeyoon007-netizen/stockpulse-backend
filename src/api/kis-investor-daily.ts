@@ -11,14 +11,23 @@ export interface InvestorDailyItem {
 
 /**
  * KIS 종목별 투자자매매동향(일별) API 호출
+ * @param endDate 조회 종료일 YYYYMMDD (기본값: baseDate와 동일 → 단일일 조회)
  */
-export async function fetchInvestorTradeDaily(stockCode: string, baseDate: string): Promise<InvestorDailyItem[]> {
+export async function fetchInvestorTradeDaily(
+  stockCode: string,
+  baseDate: string,
+  endDate?: string,
+): Promise<InvestorDailyItem[]> {
   const token = await getAccessToken();
   const appKey = process.env.KIS_APP_KEY!;
   const appSecret = process.env.KIS_APP_SECRET!;
 
-  // Parameters
-  const url = `${KIS_BASE_URL}/uapi/domestic-stock/v1/quotations/investor-trade-by-stock-daily?FID_COND_MRKT_DIV_CODE=J&FID_INPUT_ISCD=${stockCode}&FID_INPUT_DATE_1=${baseDate}&FID_ORG_ADJ_PRC=&FID_ETC_CLS_CODE=`;
+  const date2 = endDate ?? baseDate;
+  const url =
+    `${KIS_BASE_URL}/uapi/domestic-stock/v1/quotations/investor-trade-by-stock-daily` +
+    `?FID_COND_MRKT_DIV_CODE=J&FID_INPUT_ISCD=${stockCode}` +
+    `&FID_INPUT_DATE_1=${baseDate}&FID_INPUT_DATE_2=${date2}` +
+    `&FID_ORG_ADJ_PRC=&FID_ETC_CLS_CODE=`;
 
   const headers = {
     "Content-Type": "application/json",
@@ -30,15 +39,20 @@ export async function fetchInvestorTradeDaily(stockCode: string, baseDate: strin
   };
 
   try {
-    const res = await fetch(url, { headers });
+    const res = await fetch(url, { headers, signal: AbortSignal.timeout(10000) });
     if (!res.ok) {
       console.error(`[KIS API] investor-trade-by-stock-daily error: ${res.statusText}`);
       return [];
     }
     const data = await res.json();
     if (data.rt_cd === "0" && Array.isArray(data.output2)) {
+      // T14: 첫 번째 아이템의 필드 구조를 로깅해 필드명 정합성 확인
+      if (data.output2.length > 0) {
+        console.log(`[KIS API] investor-trade-by-stock-daily sample fields:`, Object.keys(data.output2[0]));
+      }
       return data.output2;
     }
+    console.warn(`[KIS API] investor-trade-by-stock-daily rt_cd=${data.rt_cd} msg=${data.msg1}`);
     return [];
   } catch (error) {
     console.error(`[KIS API] investor-trade-by-stock-daily exception:`, error);

@@ -95,7 +95,7 @@ export function evaluateEnergy(data: IndicatorsResult): ExpertOpinion {
 
   // MFI 분석
   if (mfi > 80) {
-    opinion = opinion === "상승" ? "하락" : "하락"; // 과매수면 단기 하락위험
+    opinion = "하락"; // 과매수면 단기 하락위험
     reasons.push("자금흐름지수(MFI)가 80을 넘어 스마트머니의 단계적 차익실현에 주의해야 합니다(과매수 경계).");
     confidence = 70;
   } else if (mfi < 20) {

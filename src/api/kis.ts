@@ -11,7 +11,9 @@ export const KIS_BASE_URL = IS_VTS
 
 console.log(`[KIS API] Using ${IS_VTS ? "VIRTUAL" : "REAL"} server: ${KIS_BASE_URL}`);
 
-// 인메모리 토큰 캐싱
+// 인메모리 토큰 캐싱 (단일 인스턴스 전용)
+// 스케일 아웃 시 각 인스턴스가 독립적으로 토큰을 발급해 KIS "분당 1회" 제한에 걸릴 수 있음.
+// 복수 인스턴스 운영이 필요하면 토큰을 Supabase 테이블 또는 Redis로 옮겨야 함.
 let cachedToken = "";
 let tokenExpiry = 0;
 let tokenPromise: Promise<string> | null = null;

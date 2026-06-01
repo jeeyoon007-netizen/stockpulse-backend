@@ -1,5 +1,4 @@
 import { supabase } from '../supabase.js';
-import { formatYYYYMMDD } from '../kis.js';
 
 export interface MacroAnalysisResult {
   consecutiveDepositDecline: number;
@@ -30,10 +29,14 @@ export async function calculateMacroIndicators(): Promise<MacroAnalysisResult> {
     if (!fundsError && fundsData && fundsData.length > 1) {
       let declineCount = 0;
       for (let i = 0; i < fundsData.length - 1; i++) {
+        // T10: 인접 날짜 간격이 5일 초과면 연속 단절(DB 누락 방어)
+        const prev = new Date(fundsData[i].trade_date).getTime();
+        const next = new Date(fundsData[i + 1].trade_date).getTime();
+        if ((prev - next) / (1000 * 60 * 60 * 24) > 5) break;
         if (fundsData[i].deposit < fundsData[i + 1].deposit) {
           declineCount++;
         } else {
-          break; // 연속 하락이 끊어지면 중단
+          break;
         }
       }
       result.consecutiveDepositDecline = declineCount;
@@ -51,6 +54,10 @@ export async function calculateMacroIndicators(): Promise<MacroAnalysisResult> {
       let increaseCount = 0;
       if (creditData.length > 1) {
         for (let i = 0; i < creditData.length - 1; i++) {
+          // T10: 인접 날짜 간격이 5일 초과면 연속 단절(DB 누락 방어)
+          const prev = new Date(creditData[i].trade_date).getTime();
+          const next = new Date(creditData[i + 1].trade_date).getTime();
+          if ((prev - next) / (1000 * 60 * 60 * 24) > 5) break;
           if (creditData[i].amount > creditData[i + 1].amount) {
             increaseCount++;
           } else {

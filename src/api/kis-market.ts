@@ -3,7 +3,8 @@
  * - Next.js "server-only", "cache: no-store" 등 제거
  * - 순수 Node.js fetch 기반으로 변환
  */
-import { getAccessToken, KIS_BASE_URL, formatYYYYMMDD } from './kis.js';
+import { getAccessToken, KIS_BASE_URL } from './kis.js';
+import { todayKST, shiftYYYYMMDD } from './datetime.js';
 import {
   parseMajorIndex,
   parseMajorIndexLatest,
@@ -133,7 +134,7 @@ async function fetchMajorIndexLatest(code: string, label: string): Promise<Index
   };
 
   try {
-    const res = await fetch(url, { headers });
+    const res = await fetchWithTimeout(url, { headers });
     if (!res.ok) return null;
     const data = await res.json();
     return parseMajorIndexLatest(data, label);
@@ -209,13 +210,13 @@ export async function fetchADRFromInfo(): Promise<ADRCombinedData> {
  * 원/달러 환율 (한국은행 ECOS API)
  */
 export async function fetchExchangeRate(): Promise<IndexPriceData | null> {
-  const BOK_API_KEY = process.env.BOK_API_KEY || "D7Z1MD14MIETKMYQBYYB";
-  const today = new Date();
-  const past = new Date();
-  past.setDate(today.getDate() - 14);
-
-  const startStr = formatYYYYMMDD(past);
-  const endStr = formatYYYYMMDD(today);
+  const BOK_API_KEY = process.env.BOK_API_KEY;
+  if (!BOK_API_KEY) {
+    console.warn('[fetchExchangeRate] BOK_API_KEY 환경변수가 설정되지 않아 환율 조회를 건너뜁니다.');
+    return null;
+  }
+  const endStr = todayKST();
+  const startStr = shiftYYYYMMDD(endStr, -14);
   const url = `http://ecos.bok.or.kr/api/StatisticSearch/${BOK_API_KEY}/json/kr/1/10/731Y001/D/${startStr}/${endStr}/0000001`;
 
   try {
@@ -237,7 +238,7 @@ export async function fetchMarketFunds(): Promise<{ funds: MarketFundsData | nul
   const appKey = process.env.KIS_APP_KEY!;
   const appSecret = process.env.KIS_APP_SECRET!;
 
-  const dateStr = formatYYYYMMDD(new Date());
+  const dateStr = todayKST();
   const url = `${KIS_BASE_URL}/uapi/domestic-stock/v1/quotations/mktfunds?FID_INPUT_DATE_1=${dateStr}`;
   const headers = {
     "Content-Type": "application/json",
@@ -281,7 +282,8 @@ export async function fetchInvestorRanking(type: '1' | '2', market = '0001'): Pr
   };
 
   try {
-    const res = await fetch(url, { headers });
+    const res = await fetchWithTimeout(url, { headers });
+    if (!res.ok) return [];
     const data = await res.json();
     return parseInvestorRanking(data, type);
   } catch (error) {
@@ -309,7 +311,7 @@ export async function fetchStockDetail(code: string, marketDiv = 'J') {
   };
 
   try {
-    const res = await fetch(url, { headers });
+    const res = await fetchWithTimeout(url, { headers });
     if (!res.ok) return null;
     const data = await res.json();
     return parseStockDetail(data);

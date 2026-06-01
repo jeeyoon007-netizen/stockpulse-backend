@@ -54,11 +54,18 @@ export async function calcConsecutiveDays(stockCode: string, actor: 'frgn' | 'or
 
   let consecutiveDays = 0;
   for (let i = 0; i < data.length; i++) {
+    // T10: 인접 두 행 날짜 간격이 5 캘린더일 초과면(주말+휴일 고려) 연속 단절
+    if (i > 0) {
+      const prev = new Date(data[i - 1].trade_date).getTime();
+      const curr = new Date(data[i].trade_date).getTime();
+      const gapDays = (prev - curr) / (1000 * 60 * 60 * 24);
+      if (gapDays > 5) break;
+    }
     const val = parseFloat(data[i][targetField] as string) || 0;
     if (val > 0) {
       consecutiveDays++;
     } else {
-      break; // 연속성 단절 시 중단
+      break;
     }
   }
 

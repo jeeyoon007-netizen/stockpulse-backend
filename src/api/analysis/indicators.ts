@@ -1,5 +1,23 @@
-import { SMA, MFI, VWAP, RSI, ADX, ATR } from "technicalindicators";
+import { SMA, MFI, RSI, ADX, ATR } from "technicalindicators";
 import { type OHLCV, AnalysisError } from "../kis-stock-ohlcv.js";
+
+const VWAP_PERIOD = 20;
+
+/** 롤링 N일 VWAP = Σ(typicalPrice×volume, 최근 N) / Σ(volume, 최근 N) */
+function calcRollingVWAP(
+  highs: number[], lows: number[], closes: number[], volumes: number[], period = VWAP_PERIOD
+): number[] {
+  return closes.map((_, i) => {
+    if (i < period - 1) return NaN;
+    let sumTPV = 0, sumVol = 0;
+    for (let j = i - period + 1; j <= i; j++) {
+      const tp = (highs[j] + lows[j] + closes[j]) / 3;
+      sumTPV += tp * volumes[j];
+      sumVol += volumes[j];
+    }
+    return sumVol > 0 ? sumTPV / sumVol : closes[i];
+  });
+}
 
 export interface IndicatorsResult {
   sma5: number;
@@ -18,7 +36,6 @@ export interface IndicatorsResult {
   recentHigh: number; // 최근 60일내 최고가
   recentLow: number;  // 최근 60일내 최저가
   rsiHistory: number[];  // 최근 5개 RSI (히스테리시스 판단용)
-  adxHistory: number[];  // 최근 5개 ADX
 }
 
 /**
@@ -47,12 +64,7 @@ export function calculateIndicators(ohlcvs: OHLCV[]): IndicatorsResult {
     period: 14,
   });
 
-  const vwapArr = VWAP.calculate({
-    high: highs,
-    low: lows,
-    close: closes,
-    volume: volumes,
-  });
+  const vwapArr = calcRollingVWAP(highs, lows, closes, volumes);
 
   const rsiArr = RSI.calculate({ values: closes, period: 14 });
 
@@ -73,21 +85,22 @@ export function calculateIndicators(ohlcvs: OHLCV[]): IndicatorsResult {
   // 배열의 마지막 값이 가장 최신(현재) 지표값
   const last = <T>(arr: T[]): T => arr[arr.length - 1];
 
-  const recent60 = closes.slice(-60);
-  const recentHigh = Math.max(...recent60);
-  const recentLow = Math.min(...recent60);
+  // T7: 실제 고가/저가 기반으로 수정 (종가 기반이면 피보나치 범위가 실제 변동폭 미반영)
+  const recentHigh = Math.max(...highs.slice(-60));
+  const recentLow = Math.min(...lows.slice(-60));
 
   const lastADX = last(adxArr) || { adx: 0, pdi: 0, mdi: 0 };
 
   const rsiHistory = rsiArr.slice(-5);
-  const adxHistory = adxArr.slice(-5).map(v => v.adx || 0);
+
+  const lastVWAP = vwapArr[vwapArr.length - 1];
 
   return {
     sma5: last(sma5Arr) || 0,
     sma20: last(sma20Arr) || 0,
     sma60: last(sma60Arr) || 0,
     mfi: last(mfiArr) || 0,
-    vwap: last(vwapArr) || 0,
+    vwap: Number.isFinite(lastVWAP) ? lastVWAP : last(closes),
     rsi: last(rsiArr) || 0,
     adx: lastADX.adx || 0,
     pdi: lastADX.pdi || 0,
@@ -99,7 +112,6 @@ export function calculateIndicators(ohlcvs: OHLCV[]): IndicatorsResult {
     recentHigh,
     recentLow,
     rsiHistory,
-    adxHistory,
   };
 }
 
@@ -131,9 +143,12 @@ export function calculateRollingIndicators(ohlcvs: OHLCV[]): RollingIndicators {
   const sma60Arr = SMA.calculate({ period: 60, values: closes });
   const rsiArr = RSI.calculate({ values: closes, period: 14 });
   const mfiArr = MFI.calculate({ high: highs, low: lows, close: closes, volume: volumes, period: 14 });
-  const vwapArr = VWAP.calculate({ high: highs, low: lows, close: closes, volume: volumes });
+  const rawVwap = calcRollingVWAP(highs, lows, closes, volumes);
 
   const L = ohlcvs.length;
+
+  // 롤링 VWAP는 이미 L 길이 배열이며 앞 (VWAP_PERIOD-1)개는 NaN → null로 변환
+  const vwapPadded: (number | null)[] = rawVwap.map(v => (Number.isFinite(v) ? v : null));
 
   return {
     sma5: pad(sma5Arr, L),
@@ -141,7 +156,7 @@ export function calculateRollingIndicators(ohlcvs: OHLCV[]): RollingIndicators {
     sma60: pad(sma60Arr, L),
     rsi: pad(rsiArr, L),
     mfi: pad(mfiArr, L),
-    vwap: pad(vwapArr, L),
+    vwap: vwapPadded,
   };
 }
 
