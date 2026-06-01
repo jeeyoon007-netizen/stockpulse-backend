@@ -12,7 +12,7 @@ import dotenv from 'dotenv';
 dotenv.config();
 
 // API 모듈 임포트
-import { fetchMajorIndex, fetchExchangeRate, fetchMarketFunds, fetchNewHighCount, fetchInvestorRanking, fetchStockDetail } from './api/kis-market.js';
+import { fetchMajorIndex, fetchExchangeRate, fetchMarketFunds, fetchInvestorRanking, fetchStockDetail } from './api/kis-market.js';
 import { fetchFearGreedIndex, type FearGreedResponse } from './api/feargreed.js';
 import { sendKakaoAlert } from './utils/alert.js';
 import { fetchAndStoreInvestorFlow } from './api/kis-investor-daily.js';
@@ -421,12 +421,11 @@ async function fetchAllMarketData() {
     globalCache.marketOverview = [kospi, kosdaq, kospi200, exchangeRate].filter(Boolean);
     console.log(`[FETCH] 시장 지수: ${globalCache.marketOverview.length}개 수집 완료`);
 
-    // 2. 카나리아 데이터 (자금동향, 신용잔고, 신고가)
+    // 2. 카나리아 데이터 (자금동향, 신용잔고)
     // ⚠️ ADR은 Render IP 차단(403)으로 크롤링 불가 → 프론트 Vercel에서 직접 수행
     console.log("[FETCH] 카나리아 데이터 수집 중...");
-    const [combinedCanary, newHighResult, marketCaps] = await Promise.all([
+    const [combinedCanary, marketCaps] = await Promise.all([
       fetchMarketFunds().catch(e => { console.error("자금동향/신용잔고 에러:", e.message); return { funds: null, creditHistory: [] }; }),
-      fetchNewHighCount().catch(e => { console.error("신고가 에러:", e.message); return { count: 0, sectors: [] }; }),
       fetchMarketCap().catch(e => { console.error("시가총액 에러:", e.message); return null; })
     ]);
 
@@ -451,41 +450,13 @@ async function fetchAllMarketData() {
       creditHistory: combinedCanary.creditHistory,
       adrKospi: null,   // ADR: Vercel 프론트에서 fetchADRFromInfo() 호출
       adrKosdaq: null,  // ADR: Vercel 프론트에서 fetchADRFromInfo() 호출
-      newHighCount: newHighResult?.count || 0,
-      newHighSectors: newHighResult?.sectors || [],
       creditDepositRatio,
       creditMarketCapRatio,
       marketCaps,
       macroAnalysis
     };
 
-    // Supabase에 신고가 데이터 누적 저장 (실시간 T+0 영업일 기준)
-    try {
-      if (supabase && newHighResult && newHighResult.count > 0) {
-        const kstDate = new Date(Date.now() + 9 * 60 * 60 * 1000);
-        const yyyy = kstDate.getUTCFullYear();
-        const mm = String(kstDate.getUTCMonth() + 1).padStart(2, '0');
-        const dd = String(kstDate.getUTCDate()).padStart(2, '0');
-        const todayStr = `${yyyy}-${mm}-${dd}`;
-
-        const { error: upsertError } = await supabase
-          .from('market_new_highs_history')
-          .upsert({
-            trade_date: todayStr,
-            new_high_count: newHighResult.count,
-            new_high_sectors: newHighResult.sectors,
-          }, { onConflict: 'trade_date' });
-
-        if (upsertError) {
-          console.error("[SUPABASE] market_new_highs_history upsert error:", upsertError.message);
-        } else {
-          console.log(`[SUPABASE] Successfully upserted new highs for ${todayStr}: count=${newHighResult.count}`);
-        }
-      }
-    } catch (dbErr: any) {
-      console.error("[SUPABASE] DB exception:", dbErr.message);
-    }
-    console.log(`[FETCH] 카나리아: 신고가=${newHighResult?.count}종목, 업종수=${newHighResult?.sectors?.length || 0} (예탁금·신용잔고 포함, ADR은 프론트에서 크롤링)`);
+    console.log(`[FETCH] 카나리아: 예탁금·신용잔고 포함 수집 완료 (ADR은 프론트에서 크롤링)`);
 
     // 3. 공포탐욕지수
     console.log("[FETCH] 공포탐욕지수 수집 중...");
